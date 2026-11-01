@@ -1,0 +1,19 @@
+{
+  "run_id": "fixture-run",
+  "state_version": 1,
+  "state_id": "fixture-state-1",
+  "widgets": [
+    {
+      "widget_id": "title",
+      "widget_type": "text",
+      "text": "",
+      "resource_id": "title_input"
+    },
+    {
+      "widget_id": "save",
+      "widget_type": "clickable",
+      "text": "Save",
+      "resource_id": "save_button"
+    }
+  ]
+}
