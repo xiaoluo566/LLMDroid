@@ -4,7 +4,7 @@ import os
 
 setup(
     name='droidbot',
-    packages=find_packages(include=['droidbot', 'droidbot.adapter']),
+    packages=find_packages(include=['droidbot', 'droidbot.adapter', 'droidbot.maestro']),
     # this must be the same as the name above
     version='1.0.2b4',
     description='A lightweight UI-guided test input generator for Android.',

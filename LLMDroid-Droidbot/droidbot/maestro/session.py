@@ -12,6 +12,7 @@ def create_goal_state(
     return GoalState(
         run_id=run_id,
         goal_id=goal.goal_id,
+        goal_description=goal.description,
         state_version=state_version,
         subgoals=goal.subgoals,
         budget=budget or Budget(),

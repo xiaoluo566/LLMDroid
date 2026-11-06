@@ -49,6 +49,10 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DecisionResult(kind=DecisionKind.ACTION, reason="missing action")
 
+    def test_unknown_decision_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            DecisionResult(kind="UNKNOWN_DECISION", reason="无效")
+
     def test_snapshot_finds_widget_without_mutating_input(self):
         snapshot = PageSnapshot(
             run_id="run-1",

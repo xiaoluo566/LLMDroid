@@ -52,6 +52,9 @@ class PageSnapshot:
         if self.state_version < 0:
             raise ValueError("state_version 不能为负数")
         object.__setattr__(self, "widgets", tuple(self.widgets))
+        ids = [widget.widget_id for widget in self.widgets]
+        if len(ids) != len(set(ids)):
+            raise ValueError("页面控件 ID 不能重复")
 
     def find_widget(self, widget_id: str) -> WidgetSnapshot:
         for widget in self.widgets:
@@ -81,6 +84,8 @@ class PlanProposal:
     subgoals: Tuple[str, ...]
     current_subgoal: str
     reason: str
+    model_input_tokens: Optional[int] = None
+    model_output_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.plan_revision < 0:
@@ -124,6 +129,8 @@ class DecisionResult:
     action: Optional[ActionProposal] = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.kind, DecisionKind):
+            object.__setattr__(self, "kind", DecisionKind(self.kind))
         if not self.reason:
             raise ValueError("DecisionResult 必须说明 reason")
         if self.kind == DecisionKind.ACTION and self.action is None:
@@ -156,7 +163,7 @@ class ExecutionRecord:
 @dataclass(frozen=True)
 class Budget:
     events_left: int = 40
-    model_calls_left: int = 10
+    model_calls_left: int = 12
     replans_left: int = 2
 
     def __post_init__(self) -> None:
@@ -167,6 +174,11 @@ class Budget:
         if self.events_left <= 0:
             raise ValueError("设备事件预算已耗尽")
         return replace(self, events_left=self.events_left - 1)
+
+    def consume_model_call(self) -> "Budget":
+        if self.model_calls_left <= 0:
+            raise ValueError("模型调用预算已耗尽")
+        return replace(self, model_calls_left=self.model_calls_left - 1)
 
 
 @dataclass(frozen=True)
@@ -182,6 +194,8 @@ class GoalState:
     budget: Budget = field(default_factory=Budget)
     pending_action_id: Optional[str] = None
     last_feedback: Optional[str] = None
+    completed_action_ids: Tuple[str, ...] = field(default_factory=tuple)
+    goal_description: str = ""
 
     def __post_init__(self) -> None:
         if not self.run_id or not self.goal_id:
@@ -192,6 +206,7 @@ class GoalState:
             object.__setattr__(self, "status", GoalStatus(self.status))
         object.__setattr__(self, "subgoals", tuple(self.subgoals))
         object.__setattr__(self, "variables", tuple(self.variables))
+        object.__setattr__(self, "completed_action_ids", tuple(self.completed_action_ids))
         if (
             self.current_subgoal is not None
             and self.subgoals
@@ -206,6 +221,8 @@ class GoalState:
     def with_plan(self, plan: PlanProposal) -> "GoalState":
         if self.status != GoalStatus.ACTIVE:
             raise ValueError("已结束的 Goal 不能更新计划")
+        if plan.subgoals != self.subgoals:
+            raise ValueError("计划不能替换固定 Goal 的子目标")
         return self._updated(
             subgoals=plan.subgoals,
             current_subgoal=plan.current_subgoal,
@@ -231,6 +248,8 @@ class GoalState:
             raise ValueError("已结束的 Goal 不能生成动作")
         if self.pending_action_id is not None:
             raise ValueError("已有动作等待执行")
+        if action.action_id in self.completed_action_ids:
+            raise ValueError("动作 ID 已经使用")
         if action.source_state_version != self.state_version:
             raise ValueError("动作来自过期页面")
         return self._updated(
@@ -241,6 +260,14 @@ class GoalState:
     def apply_execution(self, record: ExecutionRecord) -> "GoalState":
         if self.pending_action_id != record.action_id:
             raise ValueError("ExecutionRecord 与 pending_action_id 不匹配")
+        if record.before_state_version != self.state_version:
+            raise ValueError("执行记录的前置页面版本不匹配")
+        if record.next_subgoal is not None:
+            raise ValueError("执行记录不能直接推进子目标，需先验证")
+        if record.execution_status == "EXECUTION_UNKNOWN" or (
+            record.dispatched and record.after_state_version is None
+        ):
+            return self._updated(last_feedback="EXECUTION_UNKNOWN")
         new_version = (
             self.state_version
             if record.after_state_version is None
@@ -249,12 +276,16 @@ class GoalState:
         return self._updated(
             state_version=new_version,
             pending_action_id=None,
-            current_subgoal=record.next_subgoal or self.current_subgoal,
             last_feedback=record.execution_status,
+            completed_action_ids=self.completed_action_ids + (record.action_id,),
         )
 
     def finish(self, status: Union[GoalStatus, str]) -> "GoalState":
         terminal = GoalStatus(status)
         if terminal == GoalStatus.ACTIVE:
             raise ValueError("ACTIVE 不是终态")
+        if terminal == GoalStatus.PASS:
+            raise ValueError("PASS 需要结果验证，第一周暂不支持")
+        if self.pending_action_id is not None:
+            raise ValueError("存在待确认动作时不能结束 Goal")
         return self._updated(status=terminal, pending_action_id=None)

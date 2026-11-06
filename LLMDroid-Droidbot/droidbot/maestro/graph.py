@@ -1,7 +1,12 @@
 from dataclasses import dataclass
+from dataclasses import replace
+from typing import Optional
 
 from .data_agent import DataProposalError
+from .decision_backend import ResponseFormatError
 from .schemas import (
+    ActionKind,
+    ActionProposal,
     DecisionKind,
     DecisionResult,
     GoalState,
@@ -14,6 +19,8 @@ from .schemas import (
 class DecisionOutcome:
     result: DecisionResult
     state: GoalState
+    model_input_tokens: Optional[int] = None
+    model_output_tokens: Optional[int] = None
 
 
 def decide_once(state, snapshot, planner, data_agent) -> DecisionOutcome:
@@ -53,13 +60,36 @@ def decide_once(state, snapshot, planner, data_agent) -> DecisionOutcome:
             state=state,
         )
 
+    if state.budget.events_left <= 0:
+        return DecisionOutcome(
+            result=DecisionResult(kind=DecisionKind.STOP, reason="设备事件预算已耗尽"),
+            state=state,
+        )
+
     next_state = state
+    plan = None
     try:
         if next_state.current_subgoal is None:
-            next_state = next_state.with_plan(
-                planner.plan(next_state, snapshot)
-            )
+            if getattr(planner, "uses_model", False):
+                next_state = replace(
+                    next_state,
+                    budget=next_state.budget.consume_model_call(),
+                    revision=next_state.revision + 1,
+                )
+            plan = planner.plan(next_state, snapshot)
+            next_state = next_state.with_plan(plan)
         action = data_agent.propose(next_state, snapshot)
+        if not isinstance(action, ActionProposal):
+            raise ValueError("Data 输出不是有效的动作提案")
+        widget = snapshot.find_widget(action.widget_id)
+        if action.kind == ActionKind.TEXT and widget.widget_type not in {
+            "text", "input", "editable"
+        }:
+            raise ValueError("目标控件不可输入文本")
+        if action.kind == ActionKind.CLICK and widget.widget_type not in {
+            "text", "button", "clickable"
+        }:
+            raise ValueError("目标控件不可点击")
         next_state = next_state.with_pending_action(action)
         return DecisionOutcome(
             result=DecisionResult(
@@ -68,12 +98,30 @@ def decide_once(state, snapshot, planner, data_agent) -> DecisionOutcome:
                 reason="生成第一周支持的单步动作",
             ),
             state=next_state,
+            model_input_tokens=plan.model_input_tokens if plan else None,
+            model_output_tokens=plan.model_output_tokens if plan else None,
         )
-    except (DataProposalError, KeyError, ValueError) as error:
+    except ResponseFormatError as error:
+        return DecisionOutcome(
+            result=DecisionResult(kind=DecisionKind.STOP, reason="模型响应未通过校验"),
+            state=next_state,
+            model_input_tokens=error.input_tokens,
+            model_output_tokens=error.output_tokens,
+        )
+    except (DataProposalError, KeyError, ValueError):
         return DecisionOutcome(
             result=DecisionResult(
                 kind=DecisionKind.STOP,
-                reason=f"动作提案失败: {error}",
+                reason="动作或计划未通过校验",
             ),
             state=next_state,
+            model_input_tokens=plan.model_input_tokens if plan else None,
+            model_output_tokens=plan.model_output_tokens if plan else None,
+        )
+    except Exception:
+        return DecisionOutcome(
+            result=DecisionResult(kind=DecisionKind.STOP, reason="决策调用失败"),
+            state=next_state,
+            model_input_tokens=plan.model_input_tokens if plan else None,
+            model_output_tokens=plan.model_output_tokens if plan else None,
         )
