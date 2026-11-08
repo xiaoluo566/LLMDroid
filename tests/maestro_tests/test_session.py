@@ -153,6 +153,28 @@ class SessionTests(unittest.TestCase):
             self.state.with_plan(PlanProposal(1, ("click:other",),
                                               "click:other", "改目标"))
 
+    def test_verified_subgoal_advances_only_with_evidence(self):
+        planned = self.state.with_plan(PlanProposal(
+            1, self.goal.subgoals, self.goal.subgoals[0], "开始"))
+        with self.assertRaises(ValueError):
+            planned.advance_subgoal("click:save", "")
+        advanced = planned.advance_subgoal("click:save", "rule:title-saved")
+        self.assertEqual(advanced.current_subgoal, "click:save")
+        self.assertEqual(advanced.last_feedback, "VERIFIED:rule:title-saved")
+
+    def test_last_verified_subgoal_can_end_as_unknown_but_not_pass(self):
+        planned = self.state.with_plan(PlanProposal(
+            1, self.goal.subgoals, self.goal.subgoals[0], "开始"))
+        ended = planned.advance_subgoal(None, "rule:incomplete")
+        self.assertIsNone(ended.current_subgoal)
+        self.assertEqual(ended.status.value, "UNKNOWN")
+
+    def test_verified_subgoal_can_drive_next_fixed_goal_action(self):
+        planned = self.state.with_plan(PlanProposal(
+            1, self.goal.subgoals, self.goal.subgoals[0], "开始"))
+        advanced = planned.advance_subgoal("click:save", "rule:title-saved")
+        self.assertEqual(advanced.current_subgoal, "click:save")
+
 
 if __name__ == "__main__":
     unittest.main()

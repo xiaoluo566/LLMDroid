@@ -10,6 +10,8 @@ from maestro.data_agent import RuleBasedDataAgent  # noqa: E402
 from maestro.graph import decide_once  # noqa: E402
 from maestro.planner import FixedGoalPlanner  # noqa: E402
 from maestro.planner import ModelGoalPlanner  # noqa: E402
+from maestro.planner import SingleAgentDecisionAgent  # noqa: E402
+from maestro.graph import DecisionMode  # noqa: E402
 from maestro.decision_backend import FakeDecisionBackend  # noqa: E402
 from maestro.decision_backend import ModelResponse  # noqa: E402
 from maestro.schemas import (  # noqa: E402
@@ -228,6 +230,55 @@ class GraphTests(unittest.TestCase):
                               ModelGoalPlanner(UsageBackend()), RuleBasedDataAgent())
         self.assertEqual(outcome.result.kind, DecisionKind.STOP)
         self.assertEqual((outcome.model_input_tokens, outcome.model_output_tokens), (12, 4))
+
+    def test_variable_reference_generates_reference_action(self):
+        goal = GoalSpec("g", "搜索条目", ("text_ref:search=item_title",))
+        state = create_goal_state("run-1", goal, 1).with_variable("item_title", "测试计划")
+        page = PageSnapshot("run-1", 1, "state", (WidgetSnapshot("search", "text"),))
+        outcome = decide_once(state, page, FixedGoalPlanner(), RuleBasedDataAgent())
+        self.assertEqual(outcome.result.kind, DecisionKind.ACTION)
+        self.assertEqual(outcome.result.action.value_ref, "item_title")
+        self.assertIsNone(outcome.result.action.value)
+
+    def test_missing_variable_reference_stops(self):
+        goal = GoalSpec("g", "搜索条目", ("text_ref:search=item_title",))
+        state = create_goal_state("run-1", goal, 1)
+        page = PageSnapshot("run-1", 1, "state", (WidgetSnapshot("search", "text"),))
+        outcome = decide_once(state, page, FixedGoalPlanner(), RuleBasedDataAgent())
+        self.assertEqual(outcome.result.kind, DecisionKind.STOP)
+
+    def test_single_agent_mode_uses_one_decision_backend(self):
+        goal = GoalSpec("g", "输入标题", ("text:title=hello",))
+        state = create_goal_state("run-1", goal, 1)
+        backend = FakeDecisionBackend({"single_agent": {
+            "current_subgoal": "text:title=hello",
+            "action": {"kind": "TEXT", "widget_id": "title", "value": "hello"},
+        }})
+        page = PageSnapshot("run-1", 1, "state", (WidgetSnapshot("title", "text"),))
+        outcome = decide_once(
+            state, page, FixedGoalPlanner(), RuleBasedDataAgent(),
+            mode=DecisionMode.SINGLE_AGENT,
+            single_agent=SingleAgentDecisionAgent(backend),
+        )
+        self.assertEqual(outcome.result.kind, DecisionKind.ACTION)
+        self.assertEqual(len(backend.requests), 1)
+
+    def test_replan_keeps_fixed_goal_and_records_reason(self):
+        planner = FixedGoalPlanner()
+        plan = planner.replan(
+            self.state, self.snapshot, "当前路径边失效"
+        )
+        self.assertEqual(plan.subgoals, self.state.subgoals)
+        self.assertIn("当前路径边失效", plan.reason)
+
+    def test_planner_emits_navigation_request_for_b_bridge(self):
+        request = FixedGoalPlanner().navigation_request(
+            self.state, self.snapshot, target_state_id="state-target",
+            blocked_edges=("state-1->state-old",)
+        )
+        self.assertEqual(request.current_state_id, "state-1")
+        self.assertEqual(request.target_state_id, "state-target")
+        self.assertEqual(request.blocked_edges, ("state-1->state-old",))
 
 
 if __name__ == "__main__":

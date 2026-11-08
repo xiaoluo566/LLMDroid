@@ -85,3 +85,18 @@ B 执行后返回：
 - 自动重规划和多轮恢复。
 - 跨进程 checkpoint。
 - Humanoid/Fastbot 接入。
+
+## 第二周 A 侧接口
+
+~~~python
+advance_subgoal(next_subgoal, evidence_ref) -> GoalState
+planner.replan(state, snapshot, reason) -> PlanProposal
+decide_once(..., mode=DecisionMode.SINGLE_AGENT,
+            single_agent=SingleAgentDecisionAgent(...))
+~~~
+
+advance_subgoal 只接受固定 Goal 中的相邻子目标和非空证据引用。ExecutionRecord 不能直接推进子目标，设备观察也不能直接产生 PASS。
+
+replan 保留原 Goal 和子目标集合，先记录原因；当前版本不承担 UTG 查询，真实路径候选仍由 B 的底座接口提供。
+
+Single-Agent 模式用一次模型请求同时提出当前子目标和动作，用于后续对照实验；它与多角色模式共用状态、版本和动作校验。

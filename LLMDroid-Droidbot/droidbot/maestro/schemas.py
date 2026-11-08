@@ -79,6 +79,20 @@ class GoalSpec:
 
 
 @dataclass(frozen=True)
+class NavigationRequest:
+    run_id: str
+    goal_id: str
+    current_state_id: str
+    target_state_id: str
+    blocked_edges: Tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not all((self.run_id, self.goal_id, self.current_state_id, self.target_state_id)):
+            raise ValueError("导航请求缺少状态标识")
+        object.__setattr__(self, "blocked_edges", tuple(self.blocked_edges))
+
+
+@dataclass(frozen=True)
 class PlanProposal:
     plan_revision: int
     subgoals: Tuple[str, ...]
@@ -242,6 +256,31 @@ class GoalState:
         values = dict(self.variables)
         values[name] = value
         return self._updated(variables=tuple(sorted(values.items())))
+
+    def advance_subgoal(self, next_subgoal: Optional[str], evidence_ref: str) -> "GoalState":
+        if self.status != GoalStatus.ACTIVE:
+            raise ValueError("已结束的 Goal 不能推进子目标")
+        if not evidence_ref:
+            raise ValueError("推进子目标必须提供证据引用")
+        if next_subgoal is not None:
+            if next_subgoal not in self.subgoals:
+                raise ValueError("下一子目标不属于固定 Goal")
+            current_index = (
+                self.subgoals.index(self.current_subgoal)
+                if self.current_subgoal in self.subgoals
+                else -1
+            )
+            if self.subgoals.index(next_subgoal) != current_index + 1:
+                raise ValueError("只能推进到固定 Goal 的相邻子目标")
+            return self._updated(
+                current_subgoal=next_subgoal,
+                last_feedback=f"VERIFIED:{evidence_ref}",
+            )
+        return self._updated(
+            current_subgoal=None,
+            status=GoalStatus.UNKNOWN,
+            last_feedback=f"VERIFIED:{evidence_ref}",
+        )
 
     def with_pending_action(self, action: ActionProposal) -> "GoalState":
         if self.status != GoalStatus.ACTIVE:

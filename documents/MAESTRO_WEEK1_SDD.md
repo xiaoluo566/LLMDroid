@@ -71,3 +71,34 @@ PageSnapshot
 3. 缺控件、非法 JSON、预算耗尽和重复 action_id 都有确定结果。
 4. Graph 不导入 Android 依赖，不直接调用 ADB 或 InputManager。
 5. 原论文仓库代码不被改写；B 后续通过 bridge 接入。
+
+## 第二周 A 侧 SDD 补充
+
+### 目标
+
+在不修改 B 侧 policy、UTG、InputManager 的前提下，让 A 侧能够管理固定 Goal 的连续步骤，并提供 Single-Agent 对照和有限重规划接口。
+
+### 状态推进
+
+- 设备观察只能更新页面版本和反馈，不能直接推进子目标。
+- 只有显式调用 advance_subgoal(next_subgoal, evidence_ref) 才能推进固定 Goal 的相邻子目标。
+- 证据不足时只能进入 UNKNOWN 或继续等待，不能标记 PASS。
+- 未发送、发送不明或前置页面版本不匹配的 ExecutionRecord 不能推进任务。
+
+### 变量引用
+
+- Data 支持 text_ref:控件ID=变量名 子目标。
+- 变量不存在、变量为空或控件类型不匹配时返回受控失败。
+- ActionProposal 只携带 value 或 value_ref 其中一个；设备侧如何解析引用由后续 bridge 约定。
+
+### 有限重规划
+
+- Planner 提供 replan(state, snapshot, reason) 接口。
+- 重规划只能保留原 Goal 的子目标集合，不能静默换 Goal。
+- 第一阶段只记录重规划原因并保留当前子目标；真实 UTG 路径查询由 B 后续提供。
+
+### Single-Agent 对照
+
+- DecisionMode.SINGLE_AGENT 通过一次模型请求同时返回计划和动作。
+- 与三角色模式共用 GoalState、动作校验、预算和唯一设备执行边界。
+- 第一周和第二周只实现对照入口，不据此宣称 Single-Agent 或多 Agent 的效果差异。

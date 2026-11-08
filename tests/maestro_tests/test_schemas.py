@@ -13,6 +13,7 @@ from maestro.schemas import (  # noqa: E402
     DecisionResult,
     PageSnapshot,
     WidgetSnapshot,
+    NavigationRequest,
 )
 
 
@@ -67,6 +68,10 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             snapshot.find_widget("missing")
         self.assertEqual(len(snapshot.widgets), 1)
+
+    def test_navigation_request_requires_state_ids(self):
+        with self.assertRaises(ValueError):
+            NavigationRequest("run", "goal", "", "target")
 
 
 if __name__ == "__main__":
