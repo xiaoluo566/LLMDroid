@@ -196,6 +196,20 @@ class Budget:
 
 
 @dataclass(frozen=True)
+class VariableProposal:
+    name: str
+    value: str
+    action_id: str
+    source_state_version: int
+
+    def __post_init__(self):
+        if not self.name or not self.action_id or not isinstance(self.value, str):
+            raise ValueError("变量提案缺少名称、文本值或动作标识")
+        if self.source_state_version < 0:
+            raise ValueError("变量提案页面版本无效")
+
+
+@dataclass(frozen=True)
 class GoalState:
     run_id: str
     goal_id: str
@@ -210,6 +224,15 @@ class GoalState:
     last_feedback: Optional[str] = None
     completed_action_ids: Tuple[str, ...] = field(default_factory=tuple)
     goal_description: str = ""
+    proposed_variables: Tuple[VariableProposal, ...] = field(default_factory=tuple)
+    evaluated_action_ids: Tuple[str, ...] = field(default_factory=tuple)
+    processed_feedback_ids: Tuple[str, ...] = field(default_factory=tuple)
+    recovery_counts: Tuple[Tuple[str, int], ...] = field(default_factory=tuple)
+    last_action: Optional[ActionProposal] = None
+    observed_action_ids: Tuple[str, ...] = field(default_factory=tuple)
+    action_subgoals: Tuple[Tuple[str, Optional[str]], ...] = field(default_factory=tuple)
+    goal_source: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
+    input_constraints: Tuple[Tuple[str, str, str], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.run_id or not self.goal_id:
@@ -221,6 +244,9 @@ class GoalState:
         object.__setattr__(self, "subgoals", tuple(self.subgoals))
         object.__setattr__(self, "variables", tuple(self.variables))
         object.__setattr__(self, "completed_action_ids", tuple(self.completed_action_ids))
+        for name in ("proposed_variables", "evaluated_action_ids", "processed_feedback_ids", "recovery_counts",
+                     "observed_action_ids", "action_subgoals", "goal_source", "input_constraints"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
         if (
             self.current_subgoal is not None
             and self.subgoals
@@ -291,10 +317,27 @@ class GoalState:
             raise ValueError("动作 ID 已经使用")
         if action.source_state_version != self.state_version:
             raise ValueError("动作来自过期页面")
+        if action.value_ref is not None and self.get_variable(action.value_ref) is None:
+            raise ValueError("动作引用的变量尚未确认")
         return self._updated(
             pending_action_id=action.action_id,
             budget=self.budget.consume_event(),
+            last_action=action,
+            action_subgoals=self.action_subgoals + ((action.action_id, self.current_subgoal),),
         )
+
+    def stage_variable(self, proposal: VariableProposal) -> "GoalState":
+        if (self.status != GoalStatus.ACTIVE or proposal.action_id != self.pending_action_id
+                or proposal.source_state_version != self.state_version):
+            raise ValueError("变量提案未绑定当前待执行动作")
+        if self.get_variable(proposal.name) is not None:
+            raise ValueError("不能覆盖已确认变量")
+        if (self.last_action is None or self.last_action.value != proposal.value
+                or self.current_subgoal != f"generate:{self.last_action.widget_id}={proposal.name}"):
+            raise ValueError("变量提案与输入值或当前步骤不匹配")
+        if any(item.name == proposal.name for item in self.proposed_variables):
+            raise ValueError("变量已经有候选值")
+        return self._updated(proposed_variables=self.proposed_variables + (proposal,))
 
     def apply_execution(self, record: ExecutionRecord) -> "GoalState":
         if self.pending_action_id != record.action_id:
@@ -317,6 +360,9 @@ class GoalState:
             pending_action_id=None,
             last_feedback=record.execution_status,
             completed_action_ids=self.completed_action_ids + (record.action_id,),
+            observed_action_ids=self.observed_action_ids + (
+                (record.action_id,) if record.dispatched and record.execution_status == "OBSERVED" else ()
+            ),
         )
 
     def finish(self, status: Union[GoalStatus, str]) -> "GoalState":

@@ -25,6 +25,11 @@ class FixedGoalPlanner:
             reason=f"基于页面 {snapshot.state_id} 执行固定 Goal",
         )
 
+    def request_observation(self, state, snapshot, requirements):
+        from .cooperation import ObservationRequest
+        return ObservationRequest(state.run_id, state.goal_id, snapshot.state_version,
+                                  tuple(requirements))
+
     def replan(self, state: GoalState, snapshot: PageSnapshot, reason: str) -> PlanProposal:
         if not reason:
             raise ValueError("重规划必须说明原因")
@@ -51,7 +56,7 @@ class FixedGoalPlanner:
         )
 
 
-class ModelGoalPlanner:
+class ModelGoalPlanner(FixedGoalPlanner):
     """由模型从固定 Goal 的现有子目标中选择，不能创造新目标。"""
 
     uses_model = True
