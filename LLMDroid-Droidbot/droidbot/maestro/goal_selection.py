@@ -19,6 +19,7 @@ class GoalCandidate:
     observation_ref: str
     target_cluster_id: str
     widgets: Tuple[WidgetSnapshot, ...] = field(default_factory=tuple)
+    target_widget_id: Optional[str] = None
 
     def __post_init__(self):
         for value in (self.run_id, self.candidate_id, self.state_id, self.function,
@@ -27,6 +28,13 @@ class GoalCandidate:
                 raise ValueError('候选必须包含真实来源和页面/功能标识')
         page = PageSnapshot(self.run_id, 0, self.state_id, self.widgets)
         object.__setattr__(self, 'widgets', page.widgets)
+        if self.target_widget_id is not None:
+            try:
+                target = page.find_widget(self.target_widget_id)
+            except KeyError as error:
+                raise ValueError('功能锚点必须属于候选页面') from error
+            if target.widget_type not in {'button', 'clickable', 'input', 'editable'}:
+                raise ValueError('功能锚点必须可操作且无歧义')
 
 
 @dataclass(frozen=True)
@@ -60,7 +68,8 @@ class GoalSelectionOutcome:
             ('cluster', candidate.target_cluster_id), ('function', candidate.function),
             ('observation_ref', candidate.observation_ref),
             ('request_id', selected.request_id),
-        ))
+        ) + ((('target_widget_id', candidate.target_widget_id),)
+             if candidate.target_widget_id is not None else ()))
 
 
 class ModelGoalSelector:
@@ -127,11 +136,16 @@ class ModelGoalSelector:
                     '新文本使用 generate，复用既有数据使用 text_ref；输入完成需要提交时可以单独用 enter:widget。不能编造控件。'
                     '新任务变量为空，text_ref 只能引用前面 generate 声明的变量；'
                     '同一变量不可重复 generate，步骤字符串也不可重复。'
+                    'target_widget_id 是原功能对应的控件，不能用其他按钮代替。'
+                    '导航/打开功能只能单步 click:target_widget_id。其他按钮功能可以先准备输入，'
+                    '最后必须 click:target_widget_id；不能用输入关键词或 Enter 代替选择过滤器。'
+                    '输入功能只允许操作它本身的输入框。'
                 ),
                 'candidates': [
                     {'candidate_id': c.candidate_id, 'state_id': c.state_id,
                      'target_cluster_id': c.target_cluster_id, 'function': c.function,
                      'observation_ref': c.observation_ref,
+                     'target_widget_id': c.target_widget_id,
                      'widgets': [{'id': w.widget_id, 'type': w.widget_type, 'resource_id': w.resource_id,
                                   'text': w.text} for w in c.widgets
                                  if w.widget_type in {'button', 'clickable', 'input', 'editable', 'text'}]}
@@ -169,11 +183,34 @@ class ModelGoalSelector:
                     variables.add(variable_name)
         if len(set(steps)) != len(steps):
             raise ValueError('当前步骤协议不支持重复步骤，需使用独立步骤标识')
+        _validate_semantic_plan(candidate, steps)
         goal = GoalSpec(
             goal_id=f'{request_id}:{candidate.candidate_id}',
             description=candidate.function, subgoals=tuple(steps),
         )
         return FrozenGoal(goal, candidate, request_id)
+
+
+def _validate_semantic_plan(candidate, steps):
+    """Bind local plans to the function control already identified by LLMDroid."""
+    anchor = candidate.target_widget_id
+    if anchor is None:
+        # Offline callers can use manually authored goals without a UTG mapping.
+        return
+    target = next(widget for widget in candidate.widgets if widget.widget_id == anchor)
+    navigation = bool(re.match(r"^\s*(?:navigate(?:\s+to)?|open|go\s+to)\b", candidate.function, re.I)
+                      or candidate.function.lstrip().startswith(('进入', '打开')))
+    if target.widget_type in {'button', 'clickable'}:
+        if steps[-1] != f'click:{anchor}':
+            raise ValueError('计划必须以原功能锚点的点击结束')
+        if navigation and steps != [f'click:{anchor}']:
+            raise ValueError('导航目标只允许点击原功能锚点')
+        if any(step.startswith(('click:', 'enter:')) for step in steps[:-1]):
+            raise ValueError('功能执行前不能操作其他按钮或提交无关输入')
+        return
+    if any(step.partition(':')[2].partition('=')[0] != anchor
+           or step.startswith('click:') for step in steps):
+        raise ValueError('输入功能只能操作原功能输入框')
 
 
 def _validate_step(step, widgets):

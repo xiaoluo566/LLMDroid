@@ -257,3 +257,11 @@ class StateCluster(ActionListener):
         else:
             self.logger.warning(f"function{function} doesn't belong to any state in Cluster{self.__id}")
             return None
+
+    def get_function_target_widget(self, function: str):
+        """Return the original function's control in its recorded target state."""
+        with self.__lock:
+            detail = self.__functions.get(function)
+            if detail is None or detail['widget_id'] < 0:
+                return None
+            return detail['state'].find_widget_by_id(detail['widget_id'])

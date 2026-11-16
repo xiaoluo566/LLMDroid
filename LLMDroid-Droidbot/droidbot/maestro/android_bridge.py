@@ -89,7 +89,9 @@ def _widget_bindings(state):
             occurrences[identifier] += 1
             identifier = f"{identifier}-{occurrences[identifier]}"
             kind = "label"
-        yield WidgetSnapshot(identifier, kind, label, resource or None), view
+        yield WidgetSnapshot(identifier, kind, label, resource or None,
+                             selected=view.get('selected') is True,
+                             checked=view.get('checked') is True), view
 
 
 def snapshot_from_device(run_id, version, device_state):
@@ -109,7 +111,7 @@ def _candidate_targets(clusters, package_name, include_tested):
         for number, function in enumerate(functions, start=1):
             state = cluster.get_target_state(function)
             if state is not None and _package_name(state) == package_name and state.get_id() >= 0:
-                yield cluster_id, number, function, state
+                yield cluster, cluster_id, number, function, state
 
 
 def candidates_from_utg(run_id, utg, package_name, clusters=None):
@@ -118,14 +120,25 @@ def candidates_from_utg(run_id, utg, package_name, clusters=None):
     for include_tested in (False, True):
         targets = _candidate_targets(eligible_clusters, package_name, include_tested)
         candidates = []
-        for cluster_id, number, function, state in targets:
-            widgets = snapshot_from_device(run_id, 0, state).widgets
+        for cluster, cluster_id, number, function, state in targets:
+            bindings = tuple(_widget_bindings(state))
+            widgets = tuple(widget for widget, _ in bindings)
             if not any(w.widget_type in {"input", "button"} for w in widgets):
                 continue
+            target_id = None
+            accessor = getattr(cluster, 'get_function_target_widget', None)
+            if callable(accessor):
+                original = accessor(function)
+                matches = [widget for widget, view in bindings
+                           if original is not None and view.get('widget') is original
+                           and widget.widget_type in {'button', 'input'}]
+                if len(matches) != 1:
+                    continue
+                target_id = matches[0].widget_id
             state_id = state.get_id()
             candidates.append(GoalCandidate(
                 run_id, f"c{cluster_id}-f{number}", str(state_id), function,
-                f"states/state_{state_id}.json", str(cluster_id), widgets,
+                f"states/state_{state_id}.json", str(cluster_id), widgets, target_id,
             ))
         if candidates:
             return tuple(candidates)

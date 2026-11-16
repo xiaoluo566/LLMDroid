@@ -30,7 +30,8 @@ class AndroidRule:
 
 
 def _widget_signature(page):
-    rows = sorted((item.widget_id, item.widget_type, item.text, item.resource_id)
+    rows = sorted((item.widget_id, item.widget_type, item.text, item.resource_id,
+                   item.selected, item.checked)
                   for item in page.widgets)
     encoded = json.dumps(rows, ensure_ascii=False).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()

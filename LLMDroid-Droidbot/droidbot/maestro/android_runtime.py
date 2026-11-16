@@ -10,9 +10,10 @@ from .android_bridge import bind_event, candidates_from_utg, snapshot_from_devic
 from .android_oracle import AndroidOracle, ModelAndroidOracle, assess
 from .cooperation import Feedback, collaborate_once, merge_assessment, refresh_observation
 from .goal_selection import ModelGoalSelector
+from .goal_oracle import freeze_goal_contract, evaluate_goal, apply_goal_assessment
 from .model_data import ModelDataAgent
 from .planner import FixedGoalPlanner
-from .schemas import Budget, DecisionKind, ExecutionRecord
+from .schemas import Budget, DecisionKind, ExecutionRecord, GoalStatus, PageSnapshot, WidgetSnapshot
 from .trace import JsonlTrace
 
 
@@ -83,6 +84,8 @@ class AndroidRuntime:
             raise ValueError('Canary goal limit must be between 1 and 5')
         self.canary_goals = 0
         self.utg = None
+        self.candidate = None
+        self.goal_contract = None
         self.selector = ModelGoalSelector(
             TracedBackend(backend, self), selection_hint=(
                 'For this connectivity canary prioritize a function on the current page that exercises '
@@ -106,7 +109,9 @@ class AndroidRuntime:
 
     def select(self, utg, clusters=None):
         self.utg = utg
-        candidates = candidates_from_utg(self.run_id, utg, self.app.package_name, clusters)
+        candidates = tuple(candidate for candidate in candidates_from_utg(
+            self.run_id, utg, self.app.package_name, clusters)
+            if candidate.target_widget_id is not None)
         self.canary_fired = self.canary
         self.write('Policy', 'canary_trigger' if self.canary else 'low_growth',
                    candidate_count=len(candidates))
@@ -116,12 +121,22 @@ class AndroidRuntime:
                 self.selector.selection_hint + f' Current UTG state ID: {utg.last_state.get_id()}.'))
         selected = selector.select(self.run_id, candidates, Budget(),
                                    f'{self.run_id}:{uuid4().hex}')
+        if selected.selection is None and selected.validation_error:
+            self.write('Planner', 'plan_rejected', request_id=selected.request_id,
+                       reason=selected.validation_error)
+            repair = ModelGoalSelector(selector.backend, selection_hint=(
+                selector.selection_hint + ' Previous plan rejected: ' + selected.validation_error
+                + '. Return a corrected plan using the original function target.'))
+            selected = repair.select(self.run_id, candidates, selected.budget,
+                                     f'{self.run_id}:{uuid4().hex}')
         if selected.selection is None:
             self.write('Planner', 'selection_rejected', reason=selected.error,
                        request_id=selected.request_id, validation_error=selected.validation_error)
             self.canary_finished = self.canary
             return None
         self.state = selected.create_state(self.version)
+        self.candidate = selected.selection.candidate
+        self.goal_contract = None
         self.canary_goals += 1
         self.passed = []
         self.write('Planner', 'goal_selected', source=dict(self.state.goal_source),
@@ -129,6 +144,8 @@ class AndroidRuntime:
         return selected.selection.candidate
 
     def finish(self, status, reason):
+        if status == 'PASS' and (self.state is None or self.state.status != GoalStatus.PASS):
+            raise ValueError('Goal PASS requires a verified goal assessment')
         if self.state is not None:
             self.write('Graph', 'goal_finished', status=status, reason=reason)
             source = dict(self.state.goal_source)
@@ -140,6 +157,7 @@ class AndroidRuntime:
                                    function=source['function'])
                         break
         self.state, self.pending, self.feedback = None, None, None
+        self.candidate, self.goal_contract = None, None
         self.canary_finished = self.canary and self.canary_goals >= self.max_canary_goals
         if self.canary and not self.canary_finished:
             self.canary_fired = False
@@ -173,6 +191,9 @@ class AndroidRuntime:
             self.finish('UNKNOWN', 'Foreground activity is outside the tested app')
             return None
         snapshot = snapshot_from_device(self.run_id, self.state.state_version, device_state)
+        if self.candidate is not None and self.goal_contract is None:
+            self.goal_contract = freeze_goal_contract(self.candidate, self.state.goal_id, snapshot)
+            self.write('Oracle', 'goal_rule_frozen', contract=asdict(self.goal_contract))
         device = getattr(device_state, 'device', None)
         if device is not None and not getattr(getattr(device, 'droidbot_ime', None), 'connected', False):
             step = self.state.current_subgoal or self.state.subgoals[0]
@@ -259,13 +280,31 @@ class AndroidRuntime:
             self.passed.append(rule.kind)
             if self.state.current_subgoal is None:
                 self.write('Graph', 'planned_steps_observed', observed_rules=tuple(self.passed))
-                self.finish('UNKNOWN', 'Target function needs a goal-level semantic rule')
+                self._finish_goal(action, page, evidence, assessment)
         elif assessment.status == 'FAIL' and (self.state.current_subgoal or '').startswith('generate:'):
             self.feedback = Feedback(uuid4().hex, self.run_id, self.state.goal_id, action.action_id,
                                      self.state.state_version, 'DATA_FAILURE',
                                      'Observed input did not match the proposed value', (evidence,))
         else:
             self.finish(assessment.status, 'Rule evaluation did not establish step completion')
+
+    def _finish_goal(self, action, page, evidence, step_assessment):
+        if self.goal_contract is None:
+            self.finish('UNKNOWN', 'No frozen goal-level contract')
+            return
+        # Supplemental observations may have superseded the first callback page.
+        if step_assessment.state_version != page.state_version:
+            evidence = step_assessment.evidence_refs[0]
+            saved = json.loads((self.output / evidence).read_text(encoding='utf-8'))
+            page = PageSnapshot(saved['run_id'], saved['state_version'], saved['state_id'],
+                                tuple(WidgetSnapshot(**w) for w in saved['widgets']))
+            if saved['action_id'] != action.action_id:
+                raise ValueError('Goal observation does not match the completed action')
+        verdict = evaluate_goal(self.goal_contract, self.state, page, evidence)
+        self.write('Oracle', 'goal_assessed', assessment=asdict(verdict))
+        if verdict.status == 'PASS':
+            self.state = apply_goal_assessment(self.state, verdict)
+        self.finish(verdict.status, verdict.reason)
 
     def _save_observation(self, action, page, event_ref):
         folder = self.output / 'maestro-observations'

@@ -1,5 +1,5 @@
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 import unittest
 
@@ -25,6 +25,59 @@ class Backend:
 
 
 class GoalSelectionTests(unittest.TestCase):
+    def test_navigation_plan_cannot_substitute_search_for_log(self):
+        candidate = replace(self.candidate, function="navigate to 'Log'",
+                            target_widget_id='save', widgets=self.candidate.widgets + (
+                                WidgetSnapshot('search', 'button'),))
+        for steps in (['click:search'], ['generate:title=query', 'click:save'],
+                      ['click:save', 'text:title=unrelated']):
+            with self.subTest(steps=steps):
+                result = ModelGoalSelector(Backend({
+                    'candidate_id': 'candidate', 'subgoals': steps})).select(
+                        'run', (candidate,), Budget(), 'request')
+                self.assertIsNone(result.selection)
+        backend = Backend({'candidate_id': 'candidate', 'subgoals': ['click:save']})
+        result = ModelGoalSelector(backend).select('run', (candidate,), Budget(), 'request')
+        self.assertIsNotNone(result.selection)
+        self.assertEqual(backend.requests[0].payload['candidates'][0]['target_widget_id'], 'save')
+        self.assertEqual(dict(result.create_state().goal_source)['target_widget_id'], 'save')
+
+    def test_selected_function_requires_its_anchor_after_input_preparation(self):
+        candidate = replace(self.candidate, function='select category filter',
+                            target_widget_id='save', widgets=self.candidate.widgets + (
+                                WidgetSnapshot('search', 'button'),))
+        for steps in (['generate:title=query', 'enter:title'],
+                      ['click:search', 'click:save'], ['generate:title=query']):
+            result = ModelGoalSelector(Backend({
+                'candidate_id': 'candidate', 'subgoals': steps})).select(
+                    'run', (candidate,), Budget(), 'request')
+            self.assertIsNone(result.selection)
+        result = ModelGoalSelector(Backend({'candidate_id': 'candidate', 'subgoals': [
+            'generate:title=query', 'click:save']})).select('run', (candidate,), Budget(), 'request')
+        self.assertIsNotNone(result.selection)
+
+    def test_input_function_is_bound_to_its_own_field(self):
+        candidate = replace(self.candidate, function='enter title', target_widget_id='title',
+                            widgets=self.candidate.widgets + (WidgetSnapshot('other', 'input'),))
+        result = ModelGoalSelector(Backend({'candidate_id': 'candidate', 'subgoals': [
+            'generate:title=query', 'enter:title']})).select('run', (candidate,), Budget(), 'request')
+        self.assertIsNotNone(result.selection)
+        for steps in (['text:other=wrong'], ['click:save'], ['generate:other=query', 'enter:title']):
+            result = ModelGoalSelector(Backend({'candidate_id': 'candidate', 'subgoals': steps})).select(
+                'run', (candidate,), Budget(), 'request')
+            self.assertIsNone(result.selection)
+        with self.assertRaises(ValueError):
+            replace(candidate, target_widget_id='invented')
+        with self.assertRaises(ValueError):
+            replace(candidate, target_widget_id='readonly', widgets=(WidgetSnapshot('readonly', 'label'),))
+
+    def test_navigation_aliases_reject_unrelated_preparation(self):
+        for function in ('Open Log', 'go to Log', '进入日志', '打开日志'):
+            candidate = replace(self.candidate, function=function, target_widget_id='save')
+            result = ModelGoalSelector(Backend({'candidate_id': 'candidate', 'subgoals': [
+                'generate:title=query', 'click:save']})).select('run', (candidate,), Budget(), 'request')
+            self.assertIsNone(result.selection)
+
     def setUp(self):
         self.candidate = GoalCandidate(
             'run', 'candidate', 'page', '创建条目', 'states/page.json', 'cluster',

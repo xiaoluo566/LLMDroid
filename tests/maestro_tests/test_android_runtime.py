@@ -125,6 +125,8 @@ class AndroidRuntimeTest(unittest.TestCase):
         with TemporaryDirectory() as folder:
             output = Path(folder)
             before = self.page('a', '')
+            original_widget = object()
+            before.views[0]['widget'] = original_widget
             after = self.page('b', 'Test entry')
             widget = snapshot_from_device('preview', 0, before).widgets[0].widget_id
             backend = FakeDecisionBackend({
@@ -139,6 +141,7 @@ class AndroidRuntimeTest(unittest.TestCase):
                                       has_untested_function=lambda: True,
                                       update_tested_function=Mock(),
                                       get_target_state=lambda _: before,
+                                      get_function_target_widget=lambda _: original_widget,
                                       write_overview_top5_tojson=lambda out, **_:
                                       out.update({'State1': {'FunctionList': ['name an entry']}}))
             self.assertIsNotNone(runtime.select(SimpleNamespace(clusters=(cluster,))))

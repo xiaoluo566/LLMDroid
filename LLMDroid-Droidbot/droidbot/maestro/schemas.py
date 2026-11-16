@@ -32,12 +32,16 @@ class WidgetSnapshot:
     widget_type: str
     text: str = ""
     resource_id: Optional[str] = None
+    selected: bool = False
+    checked: bool = False
 
     def __post_init__(self) -> None:
         if not self.widget_id:
             raise ValueError("widget_id 不能为空")
         if not self.widget_type:
             raise ValueError("widget_type 不能为空")
+        if type(self.selected) is not bool or type(self.checked) is not bool:
+            raise ValueError("selected 和 checked 必须为布尔值")
 
 
 @dataclass(frozen=True)

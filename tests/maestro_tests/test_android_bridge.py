@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "LLMDroid-Droidbot" / "droidbot"))
 
 from maestro.android_bridge import bind_event, candidates_from_utg, snapshot_from_device
-from maestro.schemas import ActionKind, ActionProposal, GoalSpec
+from maestro.schemas import ActionKind, ActionProposal, GoalSpec, WidgetSnapshot
 from maestro.session import create_goal_state
 
 
@@ -59,6 +59,31 @@ class Cluster:
 
 
 class AndroidBridgeTests(unittest.TestCase):
+    def test_native_selected_checked_are_explicit_boolean_evidence(self):
+        snapshot = snapshot_from_device('run', 0, page(
+            view('example.app:id/log', clickable=True, selected=True, checked=False),
+            view('example.app:id/filter', checkable=True, selected='false', checked=True)))
+        self.assertTrue(snapshot.widgets[0].selected)
+        self.assertFalse(snapshot.widgets[0].checked)
+        self.assertFalse(snapshot.widgets[1].selected)
+        self.assertTrue(snapshot.widgets[1].checked)
+        for invalid in ('false', 1, None):
+            with self.assertRaises(ValueError):
+                WidgetSnapshot('test', 'button', selected=invalid)
+
+    def test_candidate_anchor_uses_original_widget_identity_not_page_order(self):
+        target, other = object(), object()
+        raw = page(view('example.app:id/search', clickable=True, widget=other),
+                   view('example.app:id/log', clickable=True, widget=target))
+        cluster = Cluster(1, {"navigate to 'Log'": raw})
+        cluster.get_function_target_widget = lambda function: target
+        (candidate,) = candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app')
+        self.assertEqual(candidate.widgets[1].widget_id, candidate.target_widget_id)
+        cluster.get_function_target_widget = lambda function: object()
+        self.assertEqual((), candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app'))
+        cluster.get_function_target_widget = lambda function: None
+        self.assertEqual((), candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app'))
+
     def test_logical_screenshot_size_overrides_stale_physical_dimensions(self):
         from PIL import Image
         with TemporaryDirectory() as folder:
@@ -79,7 +104,9 @@ class AndroidBridgeTests(unittest.TestCase):
         finally:
             sys.path.pop(0)
         root = Mock()
-        root.views = [view('example.app:id/save', clickable=True, text='Save')]
+        native_widget = Mock()
+        root.find_widget_by_id.return_value = native_widget
+        root.views = [view('example.app:id/save', clickable=True, text='Save', widget=native_widget)]
         root.state_str = 'observed-page'
         root.foreground_activity = 'example.app/.Main'
         root.width = root.height = 100
@@ -90,6 +117,11 @@ class AndroidBridgeTests(unittest.TestCase):
         (candidate,) = candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app')
         self.assertEqual(candidate.function, 'Save entry')
         self.assertEqual(candidate.state_id, '4')
+        self.assertEqual(candidate.target_widget_id, candidate.widgets[0].widget_id)
+        self.assertIs(cluster.get_function_target_widget('Save entry'), native_widget)
+        self.assertIsNone(cluster.get_function_target_widget('Unknown'))
+        cluster.update_tested_function('Not mapped')
+        self.assertIsNone(cluster.get_function_target_widget('Not mapped'))
 
     def setUp(self):
         self.field = view("example.app:id/value", editable=True, text="original")
