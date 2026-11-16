@@ -3,15 +3,17 @@ import json
 import logging
 import os
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
 from .android_bridge import bind_event, candidates_from_utg, snapshot_from_device
 from .android_oracle import AndroidOracle, ModelAndroidOracle, assess
 from .cooperation import Feedback, collaborate_once, merge_assessment, refresh_observation
+from .goal_agent import GoalObservation, ModelGoalOracle
 from .goal_selection import ModelGoalSelector, candidate_is_already_satisfied
-from .goal_oracle import freeze_goal_contract, evaluate_goal, apply_goal_assessment
+from .goal_oracle import (NO_GOAL_RULE, GoalAssessment, freeze_goal_contract,
+                          evaluate_goal, apply_goal_assessment)
 from .filter_workflow import (ModelFilterPlanner, append_filter_stage,
                               observe_filter_stage, assess_filter_goal)
 from .visual_evidence import inspect_tutorial_overlay
@@ -47,9 +49,9 @@ class TracedBackend:
 
     def complete(self, request):
         role = {'goal_selection': 'Planner', 'planner_stage': 'Planner',
-                'oracle': 'Oracle'}.get(request.role, 'Data')
+                'oracle': 'Oracle', 'goal_oracle': 'Oracle'}.get(request.role, 'Data')
         details = {key: request.payload[key] for key in
-                   ('state_version', 'current_subgoal', 'constraints')
+                   ('state_version', 'current_subgoal', 'constraints', 'allow_recapture')
                    if key in request.payload}
         if 'candidates' in request.payload:
             details['candidate_ids'] = [item['candidate_id'] for item in request.payload['candidates']]
@@ -76,6 +78,8 @@ class AndroidRuntime:
         self.data = ModelDataAgent(TracedBackend(backend, self))
         self.planner = FixedGoalPlanner()
         self.oracle = ModelAndroidOracle(TracedBackend(backend, self))
+        self.goal_agent = ModelGoalOracle(TracedBackend(backend, self))
+        self.goal_observations = ()
         self.filter_planner = ModelFilterPlanner(TracedBackend(backend, self))
         self.observer = AndroidOracle()
         self.version = 0
@@ -158,6 +162,7 @@ class AndroidRuntime:
         self.visual_evidence = None
         self.canary_goals += 1
         self.passed = []
+        self.goal_observations = ()
         self.write('Planner', 'goal_selected', source=dict(self.state.goal_source),
                    steps=self.state.subgoals)
         return selected.selection.candidate
@@ -178,6 +183,7 @@ class AndroidRuntime:
         self.state, self.pending, self.feedback = None, None, None
         self.candidate, self.goal_contract = None, None
         self.filter_progress, self.visual_evidence = None, None
+        self.goal_observations = ()
         self.canary_finished = self.canary and self.canary_goals >= self.max_canary_goals
         if self.canary and not self.canary_finished:
             self.canary_fired = False
@@ -306,11 +312,15 @@ class AndroidRuntime:
             assessment = self._observe_again(action, rule, page, event_log.device, evidence)
         self.write('Oracle', 'step_assessed', assessment=asdict(assessment))
         self.state = merge_assessment(self.state, assessment)
+        if assessment.status in {'PASS', 'FAIL'}:
+            page, evidence = self._rated_observation(action, page, evidence, assessment)
+            if self._supports_goal_agent():
+                self._retain_goal_observation(action, record, page, evidence, native_event_ref, event_log)
         if assessment.status == 'PASS':
             self.passed.append(rule.kind)
             if self.state.current_subgoal is None:
                 self.write('Graph', 'planned_steps_observed', observed_rules=tuple(self.passed))
-                self._finish_goal(action, page, evidence, assessment)
+                self._finish_goal(page, evidence, getattr(event_log, 'device', None))
         elif assessment.status == 'FAIL' and (self.state.current_subgoal or '').startswith('generate:'):
             self.feedback = Feedback(uuid4().hex, self.run_id, self.state.goal_id, action.action_id,
                                      self.state.state_version, 'DATA_FAILURE',
@@ -318,10 +328,7 @@ class AndroidRuntime:
         else:
             self.finish(assessment.status, 'Rule evaluation did not establish step completion')
 
-    def _finish_goal(self, action, page, evidence, step_assessment):
-        if self.goal_contract is None:
-            self.finish('UNKNOWN', 'No frozen goal-level contract')
-            return
+    def _rated_observation(self, action, page, evidence, step_assessment):
         # Supplemental observations may have superseded the first callback page.
         if step_assessment.state_version != page.state_version:
             evidence = step_assessment.evidence_refs[0]
@@ -330,15 +337,87 @@ class AndroidRuntime:
                                 tuple(WidgetSnapshot(**w) for w in saved['widgets']))
             if saved['action_id'] != action.action_id:
                 raise ValueError('Goal observation does not match the completed action')
+        return page, evidence
+
+    def _supports_goal_agent(self):
+        contract = self.goal_contract
+        return bool(contract and (contract.kind == 'open_view' or
+                    (contract.kind == 'unsupported' and contract.reason == NO_GOAL_RULE)))
+
+    def _retain_goal_observation(self, action, record, page, evidence, event_ref, log):
+        if log.from_state.state_str != self.before.state_id:
+            self.write('Oracle', 'goal_observation_rejected', action_id=action.action_id,
+                       reason='Native event start did not match the prepared page')
+            return
+        before = snapshot_from_device(self.run_id, record.before_state_version, log.from_state)
+        before_ref = self._save_observation(action, before, event_ref, log.from_state,
+                                            prefix='before')
+        row = GoalObservation(self.run_id, self.state.goal_id, action, record,
+                              before, page, before_ref, evidence, event_ref)
+        self.goal_observations += (row,)
+
+    def _finish_goal(self, page, evidence, device):
+        if self.goal_contract is None:
+            self.finish('UNKNOWN', 'No frozen goal-level contract')
+            return
         if self.goal_contract.kind == 'apply_filter':
             self._advance_filter(page, evidence)
             return
         verdict = evaluate_goal(self.goal_contract, self.state, page, evidence,
                                 visual_evidence=self.visual_evidence)
-        self.write('Oracle', 'goal_assessed', assessment=asdict(verdict))
+        source = 'deterministic'
+        if verdict.status == 'UNKNOWN' and self._supports_goal_agent():
+            verdict, source = self._ask_goal_agent(verdict, device)
+        self.write('Oracle', 'goal_assessed', assessment=asdict(verdict), verdict_source=source)
         if verdict.status == 'PASS':
             self.state = apply_goal_assessment(self.state, verdict)
+        elif verdict.status == 'FAIL':
+            self.state = self.state.finish(GoalStatus.FAIL)
         self.finish(verdict.status, verdict.reason)
+
+    def _ask_goal_agent(self, fallback, device):
+        if tuple(row.action.action_id for row in self.goal_observations) != self.state.observed_action_ids:
+            return (replace(fallback, reason='Goal observations do not cover the verified action history'),
+                    'model_unavailable')
+        try:
+            allow_recapture = device is not None and self.state.budget.model_calls_left >= 2
+            decision = self._request_goal_verdict(allow_recapture)
+            if not decision.recapture:
+                return decision.assessment, 'model'
+            self.write('Oracle', 'goal_observation_requested', action_id=fallback.action_id,
+                       reason=decision.assessment.reason)
+            if not self._recapture_goal(device):
+                return (replace(fallback, reason='Goal recapture did not return a page in the tested app'),
+                        'model_unavailable')
+            return self._request_goal_verdict(False).assessment, 'model'
+        except Exception as error:
+            self.write('Oracle', 'goal_verdict_rejected', error_type=type(error).__name__)
+            latest = self.goal_observations[-1] if self.goal_observations else None
+            refs = (latest.after_ref, latest.event_ref) if latest else fallback.evidence_refs
+            return (GoalAssessment(self.run_id, self.state.goal_id, self.state.state_version,
+                                   fallback.action_id, 'UNKNOWN',
+                                   'Goal verdict was unavailable or its evidence was invalid', refs),
+                    'model_unavailable')
+
+    def _request_goal_verdict(self, allow_recapture):
+        self.state = self.state._updated(budget=self.state.budget.consume_model_call())
+        return self.goal_agent.assess(self.state, self.goal_observations,
+                                      allow_recapture=allow_recapture)
+
+    def _recapture_goal(self, device):
+        latest = self.goal_observations[-1]
+        fresh = device.get_current_state()
+        if not self._belongs(fresh):
+            return False
+        self.version += 1
+        page = snapshot_from_device(self.run_id, self.version, fresh)
+        evidence = self._save_observation(latest.action, page, latest.event_ref, fresh)
+        self.state = self.state._updated(state_version=page.state_version)
+        self.goal_observations = self.goal_observations[:-1] + (
+            replace(latest, after=page, after_ref=evidence),)
+        self.write('Oracle', 'goal_observation_captured', action_id=latest.action.action_id,
+                   state_version=page.state_version, evidence_ref=evidence)
+        return True
 
     def _advance_filter(self, page, evidence):
         try:
@@ -420,11 +499,11 @@ class AndroidRuntime:
             after = confirmed
         return page, evidence
 
-    def _save_observation(self, action, page, event_ref, native=None):
+    def _save_observation(self, action, page, event_ref, native=None, prefix='page'):
         folder = self.output / 'maestro-observations'
         folder.mkdir(exist_ok=True)
         # A filesystem-safe name avoids colons in action IDs on Windows.
-        file = folder / f'page-{page.state_version}.json'
+        file = folder / f'{prefix}-{page.state_version}.json'
         file.write_text(json.dumps(dict(action_id=action.action_id, event_log=event_ref,
                                         screenshot_ref=self._screenshot_ref(native),
                                         **asdict(page)), ensure_ascii=False), encoding='utf-8')

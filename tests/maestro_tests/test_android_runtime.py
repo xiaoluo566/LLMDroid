@@ -164,7 +164,8 @@ class AndroidRuntimeTest(unittest.TestCase):
             self.assertEqual(finished['status'], 'UNKNOWN')
             cluster.update_tested_function.assert_called_once_with('name an entry')
             self.assertIsNone(runtime.state)
-            self.assertEqual([r.role for r in backend.requests], ['goal_selection', 'data', 'oracle'])
+            self.assertEqual([r.role for r in backend.requests], ['goal_selection', 'data', 'oracle', 'goal_oracle'])
+            self.assertEqual(backend.requests[-1].payload['variables'], {'entry': after.views[0]['text']})
 
     @staticmethod
     def page(fingerprint, value):

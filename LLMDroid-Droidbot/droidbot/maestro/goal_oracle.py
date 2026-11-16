@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 from .schemas import ActionKind, GoalStatus
 from .visual_evidence import VisualEvidence
 
+NO_GOAL_RULE = 'No supported goal-level postcondition for this function'
+
 
 @dataclass(frozen=True)
 class GoalContract:
@@ -53,7 +55,7 @@ def freeze_goal_contract(candidate, goal_id, before):
         r'^(navigate\b|go to\b|switch to\b|select\b|choose\b|进入|切换|选择)',
         candidate.function.strip(), re.IGNORECASE,
     )
-    kind, reason = 'unsupported', 'No supported goal-level postcondition for this function'
+    kind, reason = 'unsupported', NO_GOAL_RULE
     if supported and target is not None and target.widget_type in {'button', 'clickable'}:
         if target.selected or target.checked:
             reason = 'Target was already selected before the goal; no new selection can be established'
