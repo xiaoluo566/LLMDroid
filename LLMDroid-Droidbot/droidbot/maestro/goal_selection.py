@@ -1,6 +1,6 @@
 """从底座提供的页面/功能候选中选择目标；不查询 UTG 或控制设备。"""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from math import isfinite
 import re
 from typing import Optional, Tuple
@@ -55,6 +55,45 @@ def is_navigation_function(function):
     return bool(re.match(
         r'^\s*(?:navigate\s+to\b|go\s+to\b|switch\s+to\b|进入|切换)', function, re.I,
     ))
+
+
+def _candidate_equivalence(candidate: GoalCandidate):
+    target = next((widget for widget in candidate.widgets
+                   if widget.widget_id == candidate.target_widget_id), None)
+    if target is None:
+        return None
+    # Stateful business operations only share an identity inside the same recorded page.
+    navigation = is_navigation_function(candidate.function)
+    state = None if navigation else candidate.state_id
+    label = candidate.function.casefold() if navigation else candidate.function
+    return (candidate.run_id, state, ' '.join(label.split()),
+            target.widget_id, target.resource_id, target.widget_type, target.text,
+            target.checkable, target.scroll_axis, frozenset(target.allowed_actions))
+
+
+def deduplicate_candidates(candidates):
+    """Preserve rank and return discarded-to-kept pairs without masking ID conflicts."""
+    candidates = tuple(candidates)
+    ids = {}
+    conflicts = set()
+    for candidate in candidates:
+        first = ids.setdefault(candidate.candidate_id, candidate)
+        if first is not candidate and asdict(first) != asdict(candidate):
+            conflicts.add(candidate.candidate_id)
+
+    representatives = {}
+    kept = []
+    duplicates = []
+    for candidate in candidates:
+        key = _candidate_equivalence(candidate)
+        if key is None or candidate.candidate_id in conflicts:
+            kept.append(candidate)
+        elif key in representatives:
+            duplicates.append((candidate, representatives[key]))
+        else:
+            representatives[key] = candidate
+            kept.append(candidate)
+    return tuple(kept), tuple(duplicates)
 
 
 def candidate_is_already_satisfied(candidate, page):
@@ -169,6 +208,7 @@ class ModelGoalSelector:
                     '动作必须在控件 supported_actions 列表中，generate 和 text_ref 都需要 TEXT。'
                     'swipe 的方向是手指移动方向。scroll_axis 标记控件的滚动轴，据此选择滑动方向。'
                     '新文本使用 generate，复用既有数据使用 text_ref；输入完成需要提交时可以单独用 enter:widget。不能编造控件。'
+                    '若以 enter 开始，控件必须在页面上已聚焦；否则先安排有效的输入或聚焦操作。'
                     '新任务变量为空，text_ref 只能引用前面 generate 声明的变量；'
                     '同一变量不可重复 generate，步骤字符串也不可重复。'
                     'target_widget_id 是原功能对应的控件，不能用其他控件代替。'
@@ -187,7 +227,7 @@ class ModelGoalSelector:
                      'target_widget_id': c.target_widget_id,
                      'widgets': [{'id': w.widget_id, 'type': w.widget_type, 'resource_id': w.resource_id,
                                   'text': w.text, 'selected': w.selected,
-                                  'checked': w.checked, 'checkable': w.checkable,
+                                  'checked': w.checked, 'checkable': w.checkable, 'focused': w.focused,
                                   'scroll_axis': w.scroll_axis,
                                   'supported_actions': [action.value for action in w.allowed_actions]}
                                  for w in c.widgets if w.allowed_actions]}
@@ -287,7 +327,8 @@ def _explicit_gesture_actions(function):
     return ()
 
 
-def _validate_step(step, widgets):
+def step_binding(step):
+    """Parse a plan step into the action and widget it requires."""
     if not isinstance(step, str) or len(step) > 4096:
         raise ValueError('步骤格式无效')
     kind, separator, expression = step.partition(':')
@@ -302,6 +343,11 @@ def _validate_step(step, widgets):
             raise ValueError('变量名非法')
     else:
         action, widget_id = _STEP_ACTIONS[kind], expression
+    return action, widget_id
+
+
+def _validate_step(step, widgets):
+    action, widget_id = step_binding(step)
     widget = next((w for w in widgets if w.widget_id == widget_id), None)
     if widget is None or not widget.supports(action):
         raise ValueError('步骤控件不属于候选或不支持该动作')

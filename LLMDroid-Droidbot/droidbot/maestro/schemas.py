@@ -52,14 +52,15 @@ class WidgetSnapshot:
     supported_actions: tuple[ActionKind, ...] | None = None
     bounds: tuple[int, int, int, int] | None = field(default=None, compare=False)
     scroll_axis: str | None = None
+    focused: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.widget_id:
             raise ValueError("widget_id 不能为空")
         if not self.widget_type:
             raise ValueError("widget_type 不能为空")
-        if any(type(value) is not bool for value in (self.selected, self.checked, self.checkable)):
-            raise ValueError("selected、checked 和 checkable 必须为布尔值")
+        if any(type(value) is not bool for value in (self.selected, self.checked, self.checkable, self.focused)):
+            raise ValueError("控件状态属性必须为布尔值")
         if self.supported_actions is not None:
             actions = tuple(ActionKind(action) for action in self.supported_actions)
             if len(actions) != len(set(actions)):

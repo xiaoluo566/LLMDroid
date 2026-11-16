@@ -21,6 +21,9 @@ from ..coverage.androlog_monitor import AndroLogCVMonitor
 from ..coverage.jacoco_monitor import JacocoCVMonitor
 
 
+_MAESTRO_PATH_LIMIT = 3
+
+
 class Mode(Enum):
     EXPLORE = 0
     ASK_GUIDANCE = 1
@@ -95,6 +98,7 @@ class UtgBasedInputPolicy(InputPolicy):
         self.__function_to_test: str = ''
         self.__current_path: Optional[Path] = None
         self.__paths = []
+        self.__maestro_arrival_problem: Optional[str] = None
         # Each time you enter navigation mode, the number of navigation failures for each target is up to 3 times.
         # Navigation attempts are made up to three times per target, depending on the number of paths calculated.
         # When all paths fail, it is counted as a failure to navigate to the target, and the value of this variable is +1.
@@ -280,7 +284,8 @@ class UtgBasedInputPolicy(InputPolicy):
                 self.logger.info(f"Navigation succeed at this step")
                 return 1
             else:
-                self.logger.info(f"Successfully navigate to target")
+                if self.maestro_runtime is None:
+                    self.logger.info(f"Successfully navigate to target")
                 return 2
         else:
             self.logger.info(f"Navigate failed. Target at {target_id}, now at {self.current_state.get_id()}")
@@ -329,6 +334,9 @@ class UtgBasedInputPolicy(InputPolicy):
                 return
             # 2. If successful and reaching the goal
             elif status == 2:
+                if self.maestro_runtime is not None and not self.__maestro_arrival_ready():
+                    self.__on_navigate_failed()
+                    return
                 # Instead of return, enter the next code block
                 self.__on_navigate_over(True)
             # 3. fail
@@ -369,7 +377,7 @@ class UtgBasedInputPolicy(InputPolicy):
             return
         self.__navigate_target = int(candidate.state_id)
         self.__function_to_test = candidate.function
-        if self.current_state.get_id() == self.__navigate_target:
+        if self.current_state.get_id() == self.__navigate_target and self.__maestro_arrival_ready():
             self.__on_navigate_over(True)
             self.__prepare_test_function()
             return
@@ -377,12 +385,21 @@ class UtgBasedInputPolicy(InputPolicy):
             paths = self.utg.get_paths(target_state_id=self.__navigate_target)
         except (NetworkXNoPath, NodeNotFound):
             paths = []
-        paths = [path for path in paths if path.steps]
+        paths = [path for path in paths if path.steps][:_MAESTRO_PATH_LIMIT]
         if paths:
             self.__current_path, self.__paths = paths[0], paths[1:]
         else:
-            self.maestro_runtime.finish('UNKNOWN', 'No known UTG path')
-            self.__on_navigate_over(False)
+            self.__on_navigate_over(False, failure_reason='no_known_utg_path')
+
+    def __maestro_arrival_ready(self):
+        problem = self.maestro_runtime.arrival_problem(self._live_state)
+        if problem is None:
+            return True
+        self.__maestro_arrival_problem = problem
+        self.maestro_runtime.write('Planner', 'navigation_anchor_rejected', reason=problem,
+                                   target_state_id=self.__navigate_target,
+                                   observed_state_id=self.current_state.get_id())
+        return False
 
     def __on_navigate_failed(self):
         if self.__current_similarity_check > self.min_similarity:
@@ -393,7 +410,6 @@ class UtgBasedInputPolicy(InputPolicy):
             self.__current_path = self.__paths[0]
             self.__paths.pop(0)
         elif self.maestro_runtime is not None:
-            self.maestro_runtime.finish('UNKNOWN', 'Known UTG paths exhausted')
             self.__on_navigate_over(False)
         # If it is empty, check the number of failures
         elif self.__failure_in_single_round < 3:
@@ -407,11 +423,18 @@ class UtgBasedInputPolicy(InputPolicy):
             self.logger.info("Navigate has failed too many times")
             self.__on_navigate_over(False)
 
-    def __on_navigate_over(self, success: bool):
+    def __on_navigate_over(self, success: bool, *, failure_reason: str = 'utg_paths_exhausted'):
         if self.maestro_runtime is not None:
-            self.maestro_runtime.write('Planner', 'navigation_result', arrived=success,
-                                       target_state_id=self.__navigate_target,
-                                       observed_state_id=self.current_state.get_id())
+            details = dict(arrived=success, target_state_id=self.__navigate_target,
+                           observed_state_id=self.current_state.get_id())
+            problem = self.__maestro_arrival_problem or failure_reason
+            if not success:
+                details['reason'] = problem
+            self.maestro_runtime.write('Planner', 'navigation_result', **details)
+            if success:
+                self.logger.info("Successfully navigate to target")
+            else:
+                self.maestro_runtime.block_navigation(problem)
         # Statistical navigation success rate
         if success:
             self.__successful_guide_times += 1
@@ -427,6 +450,7 @@ class UtgBasedInputPolicy(InputPolicy):
         # self.__function_to_test = ''  # still useful when testing function
         self.__current_path = None
         self.__paths = []
+        self.__maestro_arrival_problem = None
         self.__failure_in_single_round = 0
         self.__current_similarity_check = self.max_similarity
 

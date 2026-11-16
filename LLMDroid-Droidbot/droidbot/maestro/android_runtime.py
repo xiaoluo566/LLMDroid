@@ -7,11 +7,13 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
+from .android_arrival import anchor_problem, arrival_problem, candidate_origin
 from .android_bridge import bind_event, read_candidate_pool, snapshot_from_device
 from .android_oracle import AndroidOracle, ModelAndroidOracle, assess
 from .cooperation import Feedback, collaborate_once, merge_assessment, refresh_observation
 from .goal_agent import GoalObservation, ModelGoalOracle
-from .goal_selection import ModelGoalSelector, candidate_is_already_satisfied
+from .goal_selection import (ModelGoalSelector, candidate_is_already_satisfied, deduplicate_candidates,
+                             step_binding)
 from .goal_oracle import (NO_GOAL_RULE, GoalAssessment, freeze_goal_contract,
                           evaluate_goal, apply_goal_assessment)
 from .filter_workflow import (ModelFilterPlanner, append_filter_stage,
@@ -95,6 +97,7 @@ class AndroidRuntime:
         self.canary_goals = 0
         self.utg = None
         self.candidate = None
+        self._unavailable_targets = {}
         self.goal_contract = None
         self.filter_progress = None
         self.visual_evidence = None
@@ -126,8 +129,16 @@ class AndroidRuntime:
                            if candidate.target_widget_id is not None)
         grounded_count = len(candidates)
         current = current_state if current_state is not None else getattr(utg, 'last_state', None)
+        page = None
         if self._belongs(current):
-            page = snapshot_from_device(self.run_id, self.version, current)
+            try:
+                page = snapshot_from_device(self.run_id, self.version, current)
+            except (OSError, ValueError) as error:
+                self.write('Planner', 'selection_observation_unavailable', error_type=type(error).__name__)
+        candidates, deferred = self._available_candidates(candidates, page)
+        candidates, duplicates = deduplicate_candidates(candidates)
+        deduplicated_count = len(candidates)
+        if page is not None:
             satisfied = tuple(c for c in candidates if candidate_is_already_satisfied(c, page))
             for candidate in satisfied:
                 self.write('Planner', 'goal_already_satisfied', candidate_id=candidate.candidate_id,
@@ -138,10 +149,16 @@ class AndroidRuntime:
         self.write('Policy', 'canary_trigger' if self.canary else 'low_growth',
                    candidate_count=len(candidates), grounded_candidate_count=grounded_count,
                    guidance_candidate_count=len(pool.functions),
+                   deduplicated_candidate_count=deduplicated_count,
+                   deferred_candidates=deferred,
+                   duplicate_candidates=[{'discarded_candidate_id': discarded.candidate_id,
+                                          'kept_candidate_id': kept.candidate_id}
+                                         for discarded, kept in duplicates],
                    rejected_candidates=[asdict(item) for item in pool.rejected])
         if not candidates:
             self.write('Planner', 'selection_empty', reason=(
-                'all_bound_candidates_already_satisfied' if grounded_count else 'no_bound_function_candidates'))
+                'all_bound_candidates_already_satisfied' if deduplicated_count else
+                'bound_candidates_deferred' if deferred else 'no_bound_function_candidates'))
             self.canary_finished = self.canary
             return None
         selector = self.selector
@@ -175,13 +192,44 @@ class AndroidRuntime:
                    steps=self.state.subgoals)
         return selected.selection.candidate
 
-    def finish(self, status, reason):
+    def _available_candidates(self, candidates, page):
+        ready, deferred = [], []
+        for candidate in candidates:
+            origin = candidate_origin(candidate)
+            prior = self._unavailable_targets.get(origin)
+            if prior is not None:
+                reason, operations = prior
+                if page is None or anchor_problem(candidate, page, operations):
+                    deferred.append({'candidate_id': candidate.candidate_id, 'reason': reason})
+                    continue
+                self._unavailable_targets.pop(origin)
+            ready.append(candidate)
+        return tuple(ready), deferred
+
+    def arrival_problem(self, device_state):
+        if self.state is None or self.candidate is None:
+            return 'goal_not_selected'
+        if not self._belongs(device_state):
+            return 'foreground_outside_test_app'
+        try:
+            page = snapshot_from_device(self.run_id, self.state.state_version, device_state)
+        except (OSError, ValueError):
+            return 'navigation_observation_unavailable'
+        return arrival_problem(self.candidate, page, self.state.subgoals)
+
+    def block_navigation(self, reason):
+        if self.state is not None and self.candidate is not None and reason.startswith('goal_anchor_'):
+            operations = tuple(step_binding(step) for step in self.state.subgoals)
+            self._unavailable_targets[candidate_origin(self.candidate)] = (reason, operations)
+        self.finish('BLOCKED', reason, mark_attempted=False)
+
+    def finish(self, status, reason, *, mark_attempted=True):
         if status == 'PASS' and (self.state is None or self.state.status != GoalStatus.PASS):
             raise ValueError('Goal PASS requires a verified goal assessment')
         if self.state is not None:
             self.write('Graph', 'goal_finished', status=status, reason=reason)
             source = dict(self.state.goal_source)
-            if self.utg is not None:
+            if self.utg is not None and mark_attempted:
                 for cluster in self.utg.clusters:
                     if str(cluster.get_id()) == source.get('cluster'):
                         cluster.update_tested_function(source['function'])
@@ -232,6 +280,13 @@ class AndroidRuntime:
             self.finish('SKIPPED', 'The navigation goal is already satisfied; no repeated click')
             return None
         if self.candidate is not None and self.goal_contract is None:
+            problem = arrival_problem(self.candidate, snapshot, self.state.subgoals)
+            if problem:
+                self.write('Planner', 'goal_preparation_blocked', reason=problem,
+                           target_widget_id=self.candidate.target_widget_id,
+                           observed_page=snapshot.state_id)
+                self.block_navigation(problem)
+                return None
             self.goal_contract = freeze_goal_contract(self.candidate, self.state.goal_id, snapshot)
             self.write('Oracle', 'goal_rule_frozen', contract=asdict(self.goal_contract))
         device = getattr(device_state, 'device', None)

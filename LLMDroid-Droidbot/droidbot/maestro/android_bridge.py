@@ -170,6 +170,7 @@ def _widget_bindings(state):
                              selected=view.get('selected') is True,
                              checked=view.get('checked') is True,
                              checkable=view.get('checkable') is True,
+                             focused=view.get('focused') is True,
                              supported_actions=actions, bounds=bounds,
                              scroll_axis=_scroll_axis(view)), view
 
