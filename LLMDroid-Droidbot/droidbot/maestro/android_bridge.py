@@ -232,10 +232,14 @@ def read_candidate_pool(run_id, utg, package_name, clusters=None):
     """Keep baseline entries and report which ones can bind to a safe native action."""
     ranked = tuple(islice(utg.clusters if clusters is None else clusters, 10))
     overview = guidance_overview(ranked)
+    by_key = {f"State{cluster.get_id()}": cluster for cluster in ranked}
     functions, candidates, observations = [], [], {}
-    for cluster in ranked:
+    # Match the original Guidance dictionary, where repeated ranked clusters
+    # contribute one entry and keep the position of their first occurrence.
+    for key, entry in overview.items():
+        cluster = by_key[key]
         cluster_id = str(cluster.get_id())
-        names = overview.get(f"State{cluster_id}", {}).get("FunctionList", ())
+        names = entry.get("FunctionList", ())
         for number, name in enumerate(names, start=1):
             item = GuidanceFunction(f"c{cluster_id}-f{number}", cluster_id, name)
             candidate, reason = _bind_candidate(run_id, cluster, item, package_name, observations)

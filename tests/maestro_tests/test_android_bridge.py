@@ -391,6 +391,17 @@ class AndroidBridgeTests(unittest.TestCase):
         self.assertEqual((), candidates_from_utg('run', utg, 'example.app'))
         self.assertEqual([], tested.ignore_importance)
 
+    def test_repeated_ranked_clusters_follow_original_deduplicated_overview(self):
+        from maestro.android_bridge import read_candidate_pool
+
+        first = Cluster(5, {'Save': self.page})
+        second = Cluster(2, {'Find entry': self.page})
+        third = Cluster(7, {'Open settings': self.page})
+        ranked = (first, second, first, third, second)
+        pool = read_candidate_pool('run', SimpleNamespace(clusters=ranked), 'example.app')
+        self.assertEqual(['Save', 'Find entry', 'Open settings'], [item.function for item in pool.functions])
+        self.assertEqual(['c5-f1', 'c2-f1', 'c7-f1'], [item.candidate_id for item in pool.candidates])
+
     def test_original_and_maestro_read_the_same_ranked_functions_and_cutoffs(self):
         from maestro.android_bridge import read_candidate_pool
         cluster_type = self.native_cluster_type()
