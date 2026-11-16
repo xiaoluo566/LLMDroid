@@ -8,6 +8,7 @@ from typing import Optional, Tuple, Union
 class ActionKind(str, Enum):
     CLICK = "CLICK"
     TEXT = "TEXT"
+    ENTER = "ENTER"
 
 
 class DecisionKind(str, Enum):
@@ -129,9 +130,9 @@ class ActionProposal:
             has_reference = self.value_ref is not None
             if has_value == has_reference:
                 raise ValueError("TEXT 动作必须且只能有 value 或 value_ref")
-        elif self.kind == ActionKind.CLICK:
+        elif self.kind in {ActionKind.CLICK, ActionKind.ENTER}:
             if self.value is not None or self.value_ref is not None:
-                raise ValueError("CLICK 动作不能携带文本值")
+                raise ValueError("CLICK/ENTER 动作不能携带文本值")
         else:
             raise ValueError(f"不支持的动作类型: {self.kind}")
 

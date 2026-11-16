@@ -254,15 +254,20 @@ class EventLog(object):
                 return True
         return False
 
-    def start(self):
+    def start(self, before_send=None):
         """
         start sending event
         """
         self.from_state = self.device.get_current_state()
+        self.dispatched = False
+        if before_send is not None and not before_send(self.event, self.from_state):
+            self.to_state = self.from_state
+            return
         self.start_profiling()
         self.event_str = self.event.get_event_str(self.from_state)
         print("Action: %s" % self.event_str)
         self.device.send_event(self.event)
+        self.dispatched = True
 
     def start_profiling(self):
         """

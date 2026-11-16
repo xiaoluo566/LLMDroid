@@ -110,6 +110,8 @@ def decide_once(
             "text", "button", "clickable"
         }:
             raise ValueError("目标控件不可点击")
+        if action.kind == ActionKind.ENTER and widget.widget_type not in {"input", "editable"}:
+            raise ValueError("Enter 只能绑定可输入控件")
         return _accept_action(next_state, snapshot, action, plan)
     except ResponseFormatError as error:
         return DecisionOutcome(
@@ -147,6 +149,8 @@ def _accept_action(state, snapshot, action, plan):
         "text", "button", "clickable"
     }:
         raise ValueError("目标控件不可点击")
+    if action.kind == ActionKind.ENTER and widget.widget_type not in {"input", "editable"}:
+        raise ValueError("Enter 只能绑定可输入控件")
     state = state.with_pending_action(action)
     return DecisionOutcome(
         result=DecisionResult(

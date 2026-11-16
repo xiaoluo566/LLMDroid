@@ -105,12 +105,37 @@ class InputManager(object):
         self.events.append(event)
 
         event_log = EventLog(self.device, self.app, event, self.profiling_method)
-        event_log.start()
+        maestro = getattr(self.policy, 'maestro_runtime', None)
+        if maestro is None:
+            event_log.start()
+        else:
+            try:
+                guided = maestro.owns_event(event)
+                event_log.start(before_send=maestro.preflight)
+                if not event_log.dispatched:
+                    if guided:
+                        self.policy.last_event = None
+                        self.policy.last_state = None
+                        self.events.pop()
+                    maestro.on_event_result(event, event_log)
+                    return
+                if guided:
+                    event.visit()
+            except Exception:
+                maestro.on_event_result(event, None)
+                raise
         while True:
             time.sleep(self.event_interval)
             if not self.device.pause_sending_event:
                 break
-        event_log.stop()
+        try:
+            event_log.stop()
+        except Exception:
+            if maestro is not None:
+                maestro.on_event_result(event, None)
+            raise
+        if maestro is not None:
+            maestro.on_event_result(event, event_log)
 
     def start(self):
         """

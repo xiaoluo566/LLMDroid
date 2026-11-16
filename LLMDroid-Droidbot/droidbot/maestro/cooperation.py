@@ -142,6 +142,8 @@ def _validate_binding(state, action, variable=None):
     widget_id, separator, value = expression.partition('=')
     if kind == 'click':
         valid = action.kind.value == 'CLICK' and action.widget_id == expression
+    elif kind == 'enter':
+        valid = action.kind.value == 'ENTER' and action.widget_id == expression
     else:
         valid = separator and action.kind.value == 'TEXT' and action.widget_id == widget_id
         if kind == 'text':

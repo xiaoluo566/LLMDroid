@@ -16,6 +16,12 @@ from maestro.session import create_goal_state
 
 
 class ModelDataTests(unittest.TestCase):
+    def test_ascii_only_transport_rejects_unrepresentable_text(self):
+        backend = FakeDecisionBackend({'data': self.response('家务')})
+        state = replace(self.state, input_constraints=((self.state.current_subgoal, 'ascii_only', 'true'),))
+        with self.assertRaises(ResponseFormatError):
+            ModelDataAgent(backend).propose(state, self.page())
+
     def setUp(self):
         goal = GoalSpec('goal', '创建条目', ('generate:title=item_title',))
         self.state = create_goal_state('run', goal, 1)

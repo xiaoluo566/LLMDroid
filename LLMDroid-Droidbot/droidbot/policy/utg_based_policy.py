@@ -7,6 +7,7 @@ from abc import abstractmethod
 from typing import Optional, Literal
 from enum import Enum
 from concurrent.futures import Future
+from networkx import NetworkXNoPath, NodeNotFound
 
 from .input_policy import InputPolicy
 from ..desc.action_type import ActionType
@@ -49,6 +50,10 @@ class UtgBasedInputPolicy(InputPolicy):
 
         # llmdroid
         self.__llm_agent = LLMAgent(app=app, utg=self.utg)
+        self.maestro_runtime = None
+        if os.environ.get('LLMDROID_MAESTRO') == '1':
+            from ..maestro.android_runtime import AndroidRuntime
+            self.maestro_runtime = AndroidRuntime(app, self.__llm_agent.maestro_backend())
         self.__current_mode: Mode = Mode.EXPLORE
 
         # cv monitor
@@ -117,8 +122,13 @@ class UtgBasedInputPolicy(InputPolicy):
         @return:
         """
 
+        if self.maestro_runtime is not None and (
+                self.maestro_runtime.canary_finished or self.maestro_runtime.uncertain_write):
+            from .input_policy import InputInterruptedException
+            raise InputInterruptedException('MAESTRO reached its run limit or has uncertain dispatch; inspect trace')
         # Get current device state
         self.current_state: DeviceState = self.device.get_current_state()
+        self._live_state = self.current_state
 
         if self.current_state is None:
             import time
@@ -151,7 +161,8 @@ class UtgBasedInputPolicy(InputPolicy):
         self.last_state = self.current_state
         self.last_event = event
 
-        event.visit()
+        if self.maestro_runtime is None or not self.maestro_runtime.owns_event(event):
+            event.visit()
         # self.current_state.print_events()
         self.logger.info(f"Next event: {event.to_description()}")
         return event
@@ -285,8 +296,15 @@ class UtgBasedInputPolicy(InputPolicy):
         if self.__cv_monitor is not None:
             self.__cv_monitor.update_code_coverage()
 
+        if (self.maestro_runtime is not None and self.__current_mode == Mode.TEST_FUNCTION
+                and self.maestro_runtime.state is None):
+            self.__prepare_back_to_explore()
+
         if self.__current_mode == Mode.EXPLORE:
-            should_wait = self.__check_should_wait()
+            should_wait = (self.maestro_runtime is not None
+                           and self.maestro_runtime.early_guidance_ready(self._live_state))
+            if not should_wait:
+                should_wait = self.__check_should_wait()
             if should_wait:
                 self.__llm_agent.wait_until_queue_empty()
                 self.__current_mode = Mode.ASK_GUIDANCE
@@ -325,6 +343,9 @@ class UtgBasedInputPolicy(InputPolicy):
     def __prepare_for_navigate(self):
         self.__current_mode = Mode.NAVIGATE
         self.__total_guide_times += 1
+        if self.maestro_runtime is not None:
+            self.__prepare_maestro_navigation()
+            return
         # ask gpt for guidance
         self.__reset_future()
         self.__llm_agent.push_to_queue(QuestionPayload(mode=QuestionMode.GUIDE))
@@ -340,6 +361,29 @@ class UtgBasedInputPolicy(InputPolicy):
             self.logger.warning(f"There is no path from State{self.current_state.get_id()} to Cluster{self.__navigate_target}")
             self.__on_navigate_failed()
 
+    def __prepare_maestro_navigation(self):
+        candidate = self.maestro_runtime.select(
+            self.utg, self.__llm_agent.maestro_ranked_clusters())
+        if candidate is None:
+            self.__prepare_back_to_explore()
+            return
+        self.__navigate_target = int(candidate.state_id)
+        self.__function_to_test = candidate.function
+        if self.current_state.get_id() == self.__navigate_target:
+            self.__on_navigate_over(True)
+            self.__prepare_test_function()
+            return
+        try:
+            paths = self.utg.get_paths(target_state_id=self.__navigate_target)
+        except (NetworkXNoPath, NodeNotFound):
+            paths = []
+        paths = [path for path in paths if path.steps]
+        if paths:
+            self.__current_path, self.__paths = paths[0], paths[1:]
+        else:
+            self.maestro_runtime.finish('UNKNOWN', 'No known UTG path')
+            self.__on_navigate_over(False)
+
     def __on_navigate_failed(self):
         if self.__current_similarity_check > self.min_similarity:
             self.__current_similarity_check -= 0.05
@@ -348,6 +392,9 @@ class UtgBasedInputPolicy(InputPolicy):
         if self.__paths:
             self.__current_path = self.__paths[0]
             self.__paths.pop(0)
+        elif self.maestro_runtime is not None:
+            self.maestro_runtime.finish('UNKNOWN', 'Known UTG paths exhausted')
+            self.__on_navigate_over(False)
         # If it is empty, check the number of failures
         elif self.__failure_in_single_round < 3:
             # If less than three times, change the target. ask for guidance again
@@ -361,6 +408,10 @@ class UtgBasedInputPolicy(InputPolicy):
             self.__on_navigate_over(False)
 
     def __on_navigate_over(self, success: bool):
+        if self.maestro_runtime is not None:
+            self.maestro_runtime.write('Planner', 'navigation_result', arrived=success,
+                                       target_state_id=self.__navigate_target,
+                                       observed_state_id=self.current_state.get_id())
         # Statistical navigation success rate
         if success:
             self.__successful_guide_times += 1
@@ -380,6 +431,12 @@ class UtgBasedInputPolicy(InputPolicy):
         self.__current_similarity_check = self.max_similarity
 
     def __prepare_test_function(self):
+        if self.maestro_runtime is not None:
+            if self.maestro_runtime.uncertain_write:
+                from .input_policy import InputInterruptedException
+                raise InputInterruptedException('MAESTRO dispatch is uncertain; preserve evidence and stop')
+            self.__event_by_llm = self.maestro_runtime.prepare(self._live_state)
+            return
         if self.__executed_steps < 5:
             # ask gpt to choose action
             self.__reset_future()
@@ -398,14 +455,17 @@ class UtgBasedInputPolicy(InputPolicy):
         self.logger.info("Get ready to switch to EXPLORE mode")
         self.__current_mode = Mode.EXPLORE
         # check should wait related
-        self.__cv_monitor.clear()
+        if self.__cv_monitor is not None:
+            self.__cv_monitor.clear()
         # reset time
         self.__next_stage_time = time.time() + self.__GUIDANCE_INTERVAL
         # reset executed steps
         self.__executed_steps = 0
         self.__llm_agent.clear_executed_events()
         # consider the function is tested whether succeed or not
-        self.__llm_agent.add_tested_function()
+        if self.maestro_runtime is None:
+            self.__llm_agent.add_tested_function()
+        self.__function_to_test = ''
         # reanalyze clusters
         self.__additional_cluster_analysis()
 
@@ -421,6 +481,10 @@ class UtgBasedInputPolicy(InputPolicy):
         self.logger.debug(f"Total {count} cluster to reanalyse")
 
     def __resolve_new_action(self) -> InputEvent:
+        if self.maestro_runtime is not None and (
+                self.maestro_runtime.canary_finished or self.maestro_runtime.uncertain_write):
+            from .input_policy import InputInterruptedException
+            raise InputInterruptedException('MAESTRO stopped before choosing another device action')
         if self.__current_mode == Mode.NAVIGATE:
             if self.__current_path and self.__current_path.steps:
                 return self.__current_path.steps[0].event

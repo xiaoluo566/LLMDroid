@@ -6,12 +6,22 @@ class DataProposalError(ValueError):
 
 
 class RuleBasedDataAgent:
-    """第一周只支持 click:widget 和 text:widget=value。"""
+    """从固定步骤生成单个点击、文本输入或 Enter 提案。"""
 
     def propose(self, state: GoalState, snapshot: PageSnapshot) -> ActionProposal:
         subgoal = state.current_subgoal
         if not subgoal:
             raise DataProposalError("当前没有可执行子目标")
+
+        if subgoal.startswith("enter:"):
+            widget = snapshot.find_widget(subgoal[len("enter:"):])
+            if widget.widget_type not in {"input", "editable"}:
+                raise DataProposalError("Enter 只能绑定可输入控件")
+            return ActionProposal(
+                action_id=f"{state.run_id}-{state.goal_id}-action-{state.revision + 1}",
+                kind=ActionKind.ENTER, widget_id=widget.widget_id,
+                source_state_version=snapshot.state_version,
+            )
 
         if subgoal.startswith("click:"):
             widget_id = subgoal[len("click:") :]
@@ -19,7 +29,7 @@ class RuleBasedDataAgent:
             if widget.widget_type not in {"clickable", "button", "text"}:
                 raise DataProposalError(f"控件不可点击: {widget_id}")
             return ActionProposal(
-                action_id=f"{state.run_id}-action-{state.revision + 1}",
+                action_id=f"{state.run_id}-{state.goal_id}-action-{state.revision + 1}",
                 kind=ActionKind.CLICK,
                 widget_id=widget.widget_id,
                 source_state_version=snapshot.state_version,
@@ -34,7 +44,7 @@ class RuleBasedDataAgent:
             if widget.widget_type not in {"text", "input", "editable"}:
                 raise DataProposalError(f"控件不可输入文本: {widget_id}")
             return ActionProposal(
-                action_id=f"{state.run_id}-action-{state.revision + 1}",
+                action_id=f"{state.run_id}-{state.goal_id}-action-{state.revision + 1}",
                 kind=ActionKind.TEXT,
                 widget_id=widget.widget_id,
                 value=value,
@@ -52,7 +62,7 @@ class RuleBasedDataAgent:
             if widget.widget_type not in {"text", "input", "editable"}:
                 raise DataProposalError(f"控件不可输入文本: {widget_id}")
             return ActionProposal(
-                action_id=f"{state.run_id}-action-{state.revision + 1}",
+                action_id=f"{state.run_id}-{state.goal_id}-action-{state.revision + 1}",
                 kind=ActionKind.TEXT,
                 widget_id=widget.widget_id,
                 value_ref=variable_name,

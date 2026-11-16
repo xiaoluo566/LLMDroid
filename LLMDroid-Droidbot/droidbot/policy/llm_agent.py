@@ -71,10 +71,9 @@ class LLMAgent:
         # read from config file
         with open('./config.json', mode='r', encoding='utf-8') as file:
             config = json.load(file)
-            self.logger.info(f"config.json:\n{json.dumps(config, indent=4)}\n")
             self.__app_name = config['AppName']
             self.__app_desc = config['Description']
-            self.__api_key = config['ApiKey']
+            self.__api_key = os.environ.get('LLMDROID_API_KEY') or config.get('ApiKey')
             if 'Model' in config:
                 LLMAgent.MODEL_STR = config['Model']
             if 'BaseUrl' in config:
@@ -110,6 +109,13 @@ class LLMAgent:
         # self.__client.api_key = ''
         self.__client.base_url = LLMAgent.BASE_URL
         self.__client.timeout = 30000
+
+    def maestro_backend(self):
+        from ..maestro.decision_backend import OpenAICompatibleBackend
+        return OpenAICompatibleBackend(self.__client, self.MODEL_STR)
+
+    def maestro_ranked_clusters(self):
+        return tuple(self.__top_valued_cluster[:self.__p2])
 
     def is_child_thread_alive(self) -> bool:
         return self.__work_thread.is_alive()

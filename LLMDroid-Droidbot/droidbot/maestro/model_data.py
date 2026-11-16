@@ -98,7 +98,8 @@ class ModelDataAgent:
             'current_subgoal': state.current_subgoal,
             'state_id': snapshot.state_id,
             'state_version': snapshot.state_version,
-            'widgets': [{'id': w.widget_id, 'type': w.widget_type, 'text': w.text}
+            'widgets': [{'id': w.widget_id, 'type': w.widget_type, 'text': w.text,
+                         'resource_id': w.resource_id}
                         for w in snapshot.widgets],
             'variables': dict(state.variables),
             'constraints': ModelDataAgent._constraints(state, feedback),
@@ -114,13 +115,15 @@ class ModelDataAgent:
                 or variable['name'] != variable_name or variable['value'] != raw['value']):
             raise ValueError('动作与当前生成步骤不匹配')
         return ActionProposal(
-            action_id=f'{state.run_id}-data-action-{state.revision + 1}',
+            action_id=f'{state.run_id}-{state.goal_id}-data-action-{state.revision + 1}',
             kind=ActionKind.TEXT, widget_id=widget_id,
             source_state_version=snapshot.state_version, value=raw['value'],
         )
 
     @staticmethod
     def _validate_constraints(value, constraints):
+        if constraints.get('ascii_only') == 'true' and not value.isascii():
+            raise ValueError('当前设备输入通路仅支持 ASCII 文本')
         if value == constraints.get('rejected_value'):
             raise ValueError('不能重复已被页面拒绝的输入')
         for key in ('min_length', 'max_length'):

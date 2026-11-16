@@ -54,6 +54,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual((result.input_tokens, result.output_tokens), (12, 4))
         self.assertEqual(calls[0]["timeout"], 7)
         self.assertEqual(calls[0]["model"], "model")
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
 
     def test_missing_usage_is_not_reported_as_zero(self):
         from types import SimpleNamespace
