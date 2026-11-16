@@ -134,6 +134,45 @@ class AndroidBridgeTests(unittest.TestCase):
         cluster.update_tested_function('Not mapped')
         self.assertIsNone(cluster.get_function_target_widget('Not mapped'))
 
+    def test_cached_accessibility_snapshot_keeps_original_function_binding_after_later_captures(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot'))
+        try:
+            from droidbot.adapter.droidbot_app import DroidBotAppConn
+            from droidbot.desc.device_state import DeviceState
+            from droidbot.desc.state_cluster import StateCluster
+        except ImportError as error:
+            self.skipTest(f'DroidBot dependency unavailable: {error.name}')
+        finally:
+            sys.path.pop(0)
+        device = SimpleNamespace(humanoid=None, get_width=lambda **_: 1080,
+                                 get_height=lambda **_: 2280, get_random_port=lambda: 30000,
+                                 enable_accessibility_hard=False, ignore_ad=False)
+        adapter = DroidBotAppConn(device)
+        raw = [view('example.app:id/root', temp_id=0, children=[1], parent=-1),
+               view('example.app:id/misc', text='Misc', temp_id=1, children=[], parent=0,
+                    clickable=True, bounds=[[850, 2142], [1070, 2280]])]
+        adapter.last_acc_event = {'view_list': raw}
+
+        def capture():
+            return DeviceState(device, adapter.get_views(), 'example.app/.Main', [], [])
+
+        source = capture()
+        source.set_id(4)
+        cluster = StateCluster(source, 2)
+        function = "navigate to 'Misc'"
+        cluster.update_from_overview({'Overview': 'Main page', 'Function List': {function: 1}})
+        original = cluster.get_function_target_widget(function)
+        utg = SimpleNamespace(clusters=(cluster,))
+        first = candidates_from_utg('run', utg, 'example.app', clusters=(cluster,))
+        self.assertEqual(len(first), 1)
+        latest = capture()
+        capture()
+        later = candidates_from_utg('run', utg, 'example.app', clusters=(cluster,))
+        self.assertEqual(later, first)
+        self.assertIs(source.views[1]['widget'], original)
+        self.assertIsNot(latest.views[1]['widget'], original)
+        self.assertNotIn('widget', raw[1])
+
     def test_reanalysis_function_resolves_unique_original_widget_in_recorded_state(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot'))
         try:

@@ -124,6 +124,7 @@ class AndroidRuntime:
         candidates = tuple(candidate for candidate in candidates_from_utg(
             self.run_id, utg, self.app.package_name, clusters)
             if candidate.target_widget_id is not None)
+        grounded_count = len(candidates)
         current = current_state if current_state is not None else getattr(utg, 'last_state', None)
         if self._belongs(current):
             page = snapshot_from_device(self.run_id, self.version, current)
@@ -135,7 +136,12 @@ class AndroidRuntime:
             candidates = tuple(c for c in candidates if c not in satisfied)
         self.canary_fired = self.canary
         self.write('Policy', 'canary_trigger' if self.canary else 'low_growth',
-                   candidate_count=len(candidates))
+                   candidate_count=len(candidates), grounded_candidate_count=grounded_count)
+        if not candidates:
+            self.write('Planner', 'selection_empty', reason=(
+                'all_bound_candidates_already_satisfied' if grounded_count else 'no_bound_function_candidates'))
+            self.canary_finished = self.canary
+            return None
         selector = self.selector
         if self.canary and getattr(utg, 'last_state', None) is not None:
             selector = ModelGoalSelector(self.selector.backend, selection_hint=(

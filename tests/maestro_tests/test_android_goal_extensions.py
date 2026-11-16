@@ -49,8 +49,12 @@ class GoalExtensionsTests(unittest.TestCase):
             candidate = self.candidate(runtime, native, "navigate to 'Log'", 'log')
             self.assertIsNone(self.select(runtime, native, candidate))
             self.assertFalse(backend.requests)
-            skipped = [r for r in self.rows(folder) if r['event'] == 'goal_already_satisfied']
+            rows = self.rows(folder)
+            skipped = [r for r in rows if r['event'] == 'goal_already_satisfied']
             self.assertEqual(len(skipped), 1)
+            self.assertEqual(rows[-2]['grounded_candidate_count'], 1)
+            self.assertEqual(rows[-2]['candidate_count'], 0)
+            self.assertEqual(rows[-1]['reason'], 'all_bound_candidates_already_satisfied')
             self.assertEqual(runtime.canary_goals, 0)
             self.assertIsNone(runtime.pending)
 

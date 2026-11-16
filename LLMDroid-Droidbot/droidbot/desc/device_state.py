@@ -41,7 +41,7 @@ class DeviceState(object):
         self.__widgets: list[Widget] = []
         self.__merged_widgets = {}
         root = self.__init_widgets()
-        self.__root_widget = views[root]['widget']
+        self.__root_widget = self.views[root]['widget']
 
         self.state_str = self.__get_state_str()
         self.structure_str = self.__get_content_free_state_str()
@@ -79,18 +79,10 @@ class DeviceState(object):
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
 
     def __parse_views(self, raw_views):
-        views = []
-        if not raw_views or len(raw_views) == 0:
-            return views
-
-        for view_dict in raw_views:
-            # # Simplify resource_id
-            # resource_id = view_dict['resource_id']
-            # if resource_id is not None and ":" in resource_id:
-            #     resource_id = resource_id[(resource_id.find(":") + 1):]
-            #     view_dict['resource_id'] = resource_id
-            views.append(view_dict)
-        return views
+        # Accessibility may return the same cached views to multiple DeviceStates.
+        # Widget initialization attaches state-specific references to these dictionaries.
+        return [copy.deepcopy({key: value for key, value in view.items() if key != 'widget'})
+                for view in (raw_views or ())]
 
     def __assemble_view_tree(self, root_view, views):
         if not len(self.view_tree):  # bootstrap

@@ -19,6 +19,18 @@ from maestro.android_oracle import propose_rule
 
 
 class AndroidRuntimeTest(unittest.TestCase):
+    def test_empty_bound_pool_has_its_own_trace_and_makes_no_model_request(self):
+        with TemporaryDirectory() as folder, patch.dict(os.environ, {'LLMDROID_MAESTRO_CANARY': '0'}):
+            backend = FakeDecisionBackend()
+            runtime = AndroidRuntime(SimpleNamespace(output_dir=folder, package_name='example.app'), backend)
+            self.assertIsNone(runtime.select(SimpleNamespace(clusters=())))
+            rows = [json.loads(line) for line in (Path(folder) / 'maestro-trace.jsonl').read_text(
+                encoding='utf-8').splitlines()]
+            self.assertEqual(rows[-2]['grounded_candidate_count'], 0)
+            self.assertEqual(rows[-1]['event'], 'selection_empty')
+            self.assertEqual(rows[-1]['reason'], 'no_bound_function_candidates')
+            self.assertEqual(backend.requests, [])
+
     def test_supplemental_observation_keeps_direct_native_event_reference(self):
         with TemporaryDirectory() as folder:
             runtime = AndroidRuntime(SimpleNamespace(output_dir=folder, package_name='example.app'),
