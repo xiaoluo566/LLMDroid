@@ -760,7 +760,8 @@ class ScrollEvent(UIEvent):
         direction = random.choice(["up", "down", "left", "right"])
         return ScrollEvent(x, y, direction)
 
-    def send(self, device):
+    def get_drag_points(self, device=None):
+        """Return the native drag coordinates; view-bound gestures need no device."""
         if self.view is not None:
             from .desc.device_state import DeviceState
             width = DeviceState.get_view_width(view_dict=self.view)
@@ -777,22 +778,27 @@ class ScrollEvent(UIEvent):
 
         start_x, start_y = x, y
         end_x, end_y = x, y
-        duration = 500
 
-        if self.direction == "UP":
+        # Lowercase directions from DeviceState describe finger movement.
+        # Legacy uppercase directions describe content movement instead.
+        if self.direction in ("UP", "down"):
             start_y -= height * 2 / 5
             end_y += height * 2 / 5
-        elif self.direction == "DOWN":
+        elif self.direction in ("DOWN", "up"):
             start_y += height * 2 / 5
             end_y -= height * 2 / 5
-        elif self.direction == "LEFT":
+        elif self.direction in ("LEFT", "right"):
             start_x -= width * 2 / 5
             end_x += width * 2 / 5
-        elif self.direction == "RIGHT":
+        elif self.direction in ("RIGHT", "left"):
             start_x += width * 2 / 5
             end_x -= width * 2 / 5
 
-        device.view_drag((start_x, start_y), (end_x, end_y), duration)
+        return (start_x, start_y), (end_x, end_y)
+
+    def send(self, device):
+        start, end = self.get_drag_points(device)
+        device.view_drag(start, end, 500)
         return True
 
     def get_event_str(self, state):

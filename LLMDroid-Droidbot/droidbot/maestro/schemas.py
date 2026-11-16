@@ -9,6 +9,20 @@ class ActionKind(str, Enum):
     CLICK = "CLICK"
     TEXT = "TEXT"
     ENTER = "ENTER"
+    LONG_PRESS = "LONG_PRESS"
+    SWIPE_UP = "SWIPE_UP"
+    SWIPE_DOWN = "SWIPE_DOWN"
+    SWIPE_LEFT = "SWIPE_LEFT"
+    SWIPE_RIGHT = "SWIPE_RIGHT"
+
+
+_LEGACY_ACTIONS = {
+    "button": (ActionKind.CLICK,),
+    "clickable": (ActionKind.CLICK,),
+    "text": (ActionKind.CLICK, ActionKind.TEXT),
+    "input": (ActionKind.TEXT, ActionKind.ENTER),
+    "editable": (ActionKind.TEXT, ActionKind.ENTER),
+}
 
 
 class DecisionKind(str, Enum):
@@ -35,6 +49,9 @@ class WidgetSnapshot:
     selected: bool = False
     checked: bool = False
     checkable: bool = False
+    supported_actions: tuple[ActionKind, ...] | None = None
+    bounds: tuple[int, int, int, int] | None = field(default=None, compare=False)
+    scroll_axis: str | None = None
 
     def __post_init__(self) -> None:
         if not self.widget_id:
@@ -43,6 +60,31 @@ class WidgetSnapshot:
             raise ValueError("widget_type 不能为空")
         if any(type(value) is not bool for value in (self.selected, self.checked, self.checkable)):
             raise ValueError("selected、checked 和 checkable 必须为布尔值")
+        if self.supported_actions is not None:
+            actions = tuple(ActionKind(action) for action in self.supported_actions)
+            if len(actions) != len(set(actions)):
+                raise ValueError("控件动作类型不能重复")
+            object.__setattr__(self, "supported_actions", actions)
+        if self.bounds is not None:
+            bounds = tuple(self.bounds)
+            if len(bounds) != 4 or any(type(value) is not int for value in bounds):
+                raise ValueError("控件边界必须是四个整数")
+            left, top, right, bottom = bounds
+            if left >= right or top >= bottom:
+                raise ValueError("控件边界面积必须大于零")
+            object.__setattr__(self, "bounds", bounds)
+        if self.scroll_axis not in (None, "horizontal", "vertical", "both"):
+            raise ValueError("控件滑动轴无效")
+
+    @property
+    def allowed_actions(self) -> tuple[ActionKind, ...]:
+        """Use observed actions when known, including an explicitly empty inventory."""
+        if self.supported_actions is not None:
+            return self.supported_actions
+        return _LEGACY_ACTIONS.get(self.widget_type, ())
+
+    def supports(self, kind: ActionKind) -> bool:
+        return kind in self.allowed_actions
 
 
 @dataclass(frozen=True)
@@ -130,16 +172,15 @@ class ActionProposal:
             raise ValueError("action_id 和 widget_id 不能为空")
         if self.source_state_version < 0:
             raise ValueError("source_state_version 不能为负数")
-        if self.kind == ActionKind.TEXT:
+        kind = ActionKind(self.kind)
+        object.__setattr__(self, "kind", kind)
+        if kind == ActionKind.TEXT:
             has_value = self.value is not None
             has_reference = self.value_ref is not None
             if has_value == has_reference:
                 raise ValueError("TEXT 动作必须且只能有 value 或 value_ref")
-        elif self.kind in {ActionKind.CLICK, ActionKind.ENTER}:
-            if self.value is not None or self.value_ref is not None:
-                raise ValueError("CLICK/ENTER 动作不能携带文本值")
-        else:
-            raise ValueError(f"不支持的动作类型: {self.kind}")
+        elif self.value is not None or self.value_ref is not None:
+            raise ValueError(f"{kind.value} 动作不能携带文本值")
 
 
 @dataclass(frozen=True)

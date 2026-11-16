@@ -68,7 +68,7 @@ class ModelDataAgent:
             widget = snapshot.find_widget(widget_id)
         except KeyError as error:
             raise DataProposalError('生成步骤找不到目标控件') from error
-        if widget.widget_type not in {'text', 'input', 'editable'}:
+        if not widget.supports(ActionKind.TEXT):
             raise DataProposalError('目标控件不可输入文本')
         return widget_id, variable_name
 

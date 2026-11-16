@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 from .decision_backend import ResponseFormatError
 from .graph import DecisionOutcome, decide_once, _accept_action
-from .schemas import DecisionKind, DecisionResult, GoalState, GoalStatus
+from .schemas import ActionKind, DecisionKind, DecisionResult, GoalState, GoalStatus
 from .stage_steps import execution_step
 
 
@@ -141,12 +141,10 @@ def _add_usage(previous, current):
 def _validate_binding(state, action, variable=None):
     kind, _, expression = execution_step(state.current_subgoal or '').partition(':')
     widget_id, separator, value = expression.partition('=')
-    if kind == 'click':
-        valid = action.kind.value == 'CLICK' and action.widget_id == expression
-    elif kind == 'enter':
-        valid = action.kind.value == 'ENTER' and action.widget_id == expression
+    if action.kind != ActionKind.TEXT:
+        valid = action.kind.value.lower() == kind and action.widget_id == expression
     else:
-        valid = separator and action.kind.value == 'TEXT' and action.widget_id == widget_id
+        valid = separator and action.widget_id == widget_id
         if kind == 'text':
             valid = valid and action.value == value
         elif kind == 'text_ref':

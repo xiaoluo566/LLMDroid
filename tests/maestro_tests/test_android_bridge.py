@@ -57,6 +57,10 @@ class Cluster:
     def get_target_state(self, function):
         return self.entries[function]
 
+    def get_function_target_widget(self, function):
+        return next((view.get('widget') for view in self.entries[function].views
+                     if view.get('widget') is not None), None)
+
 
 class AndroidBridgeTests(unittest.TestCase):
     def test_native_checkability_is_boolean_evidence_not_a_truthy_string(self):
@@ -121,7 +125,10 @@ class AndroidBridgeTests(unittest.TestCase):
         root.foreground_activity = 'example.app/.Main'
         root.width = root.height = 100
         root.get_id.return_value = 4
-        root.get_possible_input.return_value = []
+        root.get_possible_input.return_value = [SimpleNamespace(
+            view=root.views[0], get_action_type=lambda: SimpleNamespace(name='CLICK'),
+            get_views=lambda: [root.views[0]], get_visit_count=lambda: 0, set_listener=Mock())]
+        root.find_events_by_widget.return_value = []
         root.get_all_widgets.return_value = []
         cluster = StateCluster(root, 2)
         cluster.update_from_overview({'Overview': 'Entry editor', 'Function List': {'Save entry': 1}})
@@ -192,6 +199,9 @@ class AndroidBridgeTests(unittest.TestCase):
         actual.get_id.return_value = 7
         actual.get_all_widgets.return_value = [original]
         actual.find_events_by_widget.return_value = []
+        actual.get_possible_input.return_value = [SimpleNamespace(
+            view=raw, get_action_type=lambda: SimpleNamespace(name='CLICK'),
+            get_views=lambda: [raw])]
         root.get_all_widgets.return_value = []
         cluster = StateCluster(root, 2)
         cluster.update_from_reanalysis(
@@ -216,8 +226,8 @@ class AndroidBridgeTests(unittest.TestCase):
         self.assertIsNone(cluster.get_function_target_widget('open tutorials'))
 
     def setUp(self):
-        self.field = view("example.app:id/value", editable=True, text="original")
-        self.button = view("example.app:id/save", clickable=True, text="Save")
+        self.field = view("example.app:id/value", editable=True, text="original", widget=object())
+        self.button = view("example.app:id/save", clickable=True, text="Save", widget=object())
         self.page = page(self.field, self.button, view(None, text="Confirmation"))
         self.snapshot = snapshot_from_device("run", 3, self.page)
         self.state = create_goal_state("run", GoalSpec("g", "test", ("click:save",)), 3)
@@ -340,3 +350,82 @@ class AndroidBridgeTests(unittest.TestCase):
         self.assertEqual("tested", candidate.function)
         self.assertEqual([True], ranked.ignore_importance)
         self.assertEqual([], ignored.ignore_importance)
+
+    def test_pool_matches_guidance_order_and_keeps_unbound_candidates_for_diagnosis(self):
+        from maestro.android_bridge import read_candidate_pool
+
+        scroll, press, ambiguous = object(), object(), object()
+        state = page(
+            view('example.app:id/tabs', scrollable=True, widget=scroll),
+            view('example.app:id/item', long_clickable=True, widget=press),
+            view('example.app:id/ambiguous', clickable=True, widget=ambiguous),
+            view('example.app:id/ambiguous', clickable=True, widget=object()),
+        )
+        entries = {'Swipe tabs': scroll, 'Hold item': press, 'Duplicate control': ambiguous}
+        cluster = Cluster(8, {name: state for name in entries})
+        cluster.get_function_target_widget = entries.get
+        later = Cluster(3, {'Save': self.page})
+        later.get_function_target_widget = lambda _: self.button['widget']
+        self.button['widget'] = object()
+        tested = Cluster(1, {'Already attempted': self.page}, untested=False)
+        utg = SimpleNamespace(clusters=[tested, later, cluster])
+
+        pool = read_candidate_pool('run', utg, 'example.app', (cluster, tested, later))
+        self.assertEqual(
+            tuple((str(cluster_id), name) for cluster_id, name in
+                  [(8, 'Swipe tabs'), (8, 'Hold item'), (8, 'Duplicate control'), (3, 'Save')]),
+            tuple((item.cluster_id, item.function) for item in pool.functions),
+        )
+        self.assertEqual(['Swipe tabs', 'Hold item', 'Save'], [item.function for item in pool.candidates])
+        self.assertEqual([('Duplicate control', 'unbound_target')],
+                         [(item.function, item.reason) for item in pool.rejected])
+        self.assertEqual([], tested.ignore_importance)
+
+    def test_binding_failure_does_not_substitute_already_attempted_candidates(self):
+        unbound = Cluster(1, {'Missing anchor': self.page})
+        unbound.get_function_target_widget = lambda _: None
+        tested = Cluster(2, {'Tested save': self.page}, untested=False)
+        self.button['widget'] = object()
+        tested.get_function_target_widget = lambda _: self.button['widget']
+        utg = SimpleNamespace(clusters=[unbound, tested])
+        self.assertEqual((), candidates_from_utg('run', utg, 'example.app'))
+        self.assertEqual([], tested.ignore_importance)
+
+    def test_original_and_maestro_read_the_same_ranked_functions_and_cutoffs(self):
+        from maestro.android_bridge import read_candidate_pool
+        cluster_type = self.native_cluster_type()
+        root = Mock()
+        root.get_possible_input.return_value = []
+        root.find_widget_by_id.return_value = Mock()
+        root.get_all_widgets.return_value = []
+        root.views = []
+        root.get_id.return_value = 8
+        root.foreground_activity = 'example.app/.Main'
+        names = [f'Function {index}' for index in range(7)]
+        clusters = []
+        for cluster_id in range(11):
+            cluster = cluster_type(root, cluster_id)
+            cluster.update_from_overview({'Overview': 'Main page', 'Function List': dict.fromkeys(names, 1)})
+            clusters.append(cluster)
+        original = {}
+        for cluster in clusters[:10]:
+            if cluster.has_untested_function():
+                cluster.write_overview_top5_tojson(original)
+        pool = read_candidate_pool('run', SimpleNamespace(clusters=tuple(clusters)), 'example.app')
+        self.assertEqual(
+            [(key.removeprefix('State'), name) for key, entry in original.items()
+             for name in entry['FunctionList']],
+            [(item.cluster_id, item.function) for item in pool.functions],
+        )
+        self.assertEqual(50, len(pool.functions))
+        self.assertEqual(50, len(pool.rejected))
+
+    def native_cluster_type(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot'))
+        try:
+            from droidbot.desc.state_cluster import StateCluster
+            return StateCluster
+        except ImportError as error:
+            self.skipTest(f'DroidBot dependency unavailable: {error.name}')
+        finally:
+            sys.path.pop(0)

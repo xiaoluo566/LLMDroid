@@ -6,7 +6,6 @@ from typing import Optional
 from .data_agent import DataProposalError
 from .decision_backend import ResponseFormatError
 from .schemas import (
-    ActionKind,
     ActionProposal,
     DecisionKind,
     DecisionResult,
@@ -101,17 +100,6 @@ def decide_once(
         action = data_agent.propose(next_state, snapshot)
         if not isinstance(action, ActionProposal):
             raise ValueError("Data 输出不是有效的动作提案")
-        widget = snapshot.find_widget(action.widget_id)
-        if action.kind == ActionKind.TEXT and widget.widget_type not in {
-            "text", "input", "editable"
-        }:
-            raise ValueError("目标控件不可输入文本")
-        if action.kind == ActionKind.CLICK and widget.widget_type not in {
-            "text", "button", "clickable"
-        }:
-            raise ValueError("目标控件不可点击")
-        if action.kind == ActionKind.ENTER and widget.widget_type not in {"input", "editable"}:
-            raise ValueError("Enter 只能绑定可输入控件")
         return _accept_action(next_state, snapshot, action, plan)
     except ResponseFormatError as error:
         return DecisionOutcome(
@@ -141,22 +129,14 @@ def decide_once(
 
 def _accept_action(state, snapshot, action, plan):
     widget = snapshot.find_widget(action.widget_id)
-    if action.kind == ActionKind.TEXT and widget.widget_type not in {
-        "text", "input", "editable"
-    }:
-        raise ValueError("目标控件不可输入文本")
-    if action.kind == ActionKind.CLICK and widget.widget_type not in {
-        "text", "button", "clickable"
-    }:
-        raise ValueError("目标控件不可点击")
-    if action.kind == ActionKind.ENTER and widget.widget_type not in {"input", "editable"}:
-        raise ValueError("Enter 只能绑定可输入控件")
+    if not widget.supports(action.kind):
+        raise ValueError(f"目标控件不支持 {action.kind.value} 动作")
     state = state.with_pending_action(action)
     return DecisionOutcome(
         result=DecisionResult(
             kind=DecisionKind.ACTION,
             action=action,
-            reason="生成第二周支持的单步动作",
+            reason="生成当前页面支持的单步动作",
         ),
         state=state,
         model_input_tokens=plan.model_input_tokens if plan else None,

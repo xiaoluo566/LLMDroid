@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
-from .android_bridge import bind_event, candidates_from_utg, snapshot_from_device
+from .android_bridge import bind_event, read_candidate_pool, snapshot_from_device
 from .android_oracle import AndroidOracle, ModelAndroidOracle, assess
 from .cooperation import Feedback, collaborate_once, merge_assessment, refresh_observation
 from .goal_agent import GoalObservation, ModelGoalOracle
@@ -121,9 +121,9 @@ class AndroidRuntime:
 
     def select(self, utg, clusters=None, current_state=None):
         self.utg = utg
-        candidates = tuple(candidate for candidate in candidates_from_utg(
-            self.run_id, utg, self.app.package_name, clusters)
-            if candidate.target_widget_id is not None)
+        pool = read_candidate_pool(self.run_id, utg, self.app.package_name, clusters)
+        candidates = tuple(candidate for candidate in pool.candidates
+                           if candidate.target_widget_id is not None)
         grounded_count = len(candidates)
         current = current_state if current_state is not None else getattr(utg, 'last_state', None)
         if self._belongs(current):
@@ -136,7 +136,9 @@ class AndroidRuntime:
             candidates = tuple(c for c in candidates if c not in satisfied)
         self.canary_fired = self.canary
         self.write('Policy', 'canary_trigger' if self.canary else 'low_growth',
-                   candidate_count=len(candidates), grounded_candidate_count=grounded_count)
+                   candidate_count=len(candidates), grounded_candidate_count=grounded_count,
+                   guidance_candidate_count=len(pool.functions),
+                   rejected_candidates=[asdict(item) for item in pool.rejected])
         if not candidates:
             self.write('Planner', 'selection_empty', reason=(
                 'all_bound_candidates_already_satisfied' if grounded_count else 'no_bound_function_candidates'))

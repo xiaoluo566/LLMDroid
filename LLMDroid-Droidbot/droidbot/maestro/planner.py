@@ -80,7 +80,8 @@ class ModelGoalPlanner(FixedGoalPlanner):
                 "subgoals": list(state.subgoals),
                 "state_id": snapshot.state_id,
                 "state_version": snapshot.state_version,
-                "widgets": [{"id": w.widget_id, "type": w.widget_type, "text": w.text}
+                "widgets": [{"id": w.widget_id, "type": w.widget_type, "text": w.text,
+                             "actions": [kind.value for kind in w.allowed_actions]}
                             for w in snapshot.widgets],
             },
         ))
@@ -126,11 +127,13 @@ class SingleAgentDecisionAgent:
             request_id=request_id,
             timeout_seconds=self.timeout_seconds,
             payload={
+                "instruction": "从当前控件的 actions 中选择动作类型，返回 current_subgoal 和 action",
                 "goal_description": state.goal_description,
                 "subgoals": list(state.subgoals),
                 "current_subgoal": state.current_subgoal,
                 "state_id": snapshot.state_id,
-                "widgets": [{"id": w.widget_id, "type": w.widget_type, "text": w.text}
+                "widgets": [{"id": w.widget_id, "type": w.widget_type, "text": w.text,
+                             "actions": [kind.value for kind in w.allowed_actions]}
                             for w in snapshot.widgets],
             },
         ))
@@ -155,6 +158,8 @@ class SingleAgentDecisionAgent:
                 value_ref=raw_action.get("value_ref"),
                 source_state_version=snapshot.state_version,
             )
+            if not snapshot.find_widget(action.widget_id).supports(kind):
+                raise ValueError("当前控件不支持模型选择的动作")
         except (KeyError, ValueError) as error:
             raise ResponseFormatError("单 Agent 动作未通过校验",
                                       response.input_tokens, response.output_tokens) from error

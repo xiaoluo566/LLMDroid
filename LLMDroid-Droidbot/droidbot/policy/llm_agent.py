@@ -13,6 +13,7 @@ from ..desc.action_type import ActionType
 from ..utils import save_content_to_file
 from .prompt import *
 from ..input_event import SetTextEvent
+from ..maestro.guidance_pool import guidance_overview
 
 if TYPE_CHECKING:
     from ..desc.state_cluster import StateCluster
@@ -253,15 +254,7 @@ class LLMAgent:
         self.logger.info("Ask for guidance")
         prompt = self.__start_prompt + input_explanation_guidance
 
-        cluster_info = {}
-        for cluster in self.__top_valued_cluster[:self.__p2]:
-            if cluster.has_untested_function():
-                cluster.write_overview_top5_tojson(cluster_info)
-        # if all clusters' functions are tested, just write five functions for each cluster
-        if len(cluster_info) == 0:
-            self.logger.warning("[Ask for guidance] all clusters' functions are tested")
-            for cluster in self.__top_valued_cluster[:self.__p2]:
-                cluster.write_overview_top5_tojson(cluster_info, ignore_importance=True)
+        cluster_info = guidance_overview(self.__top_valued_cluster[:self.__p2])
         prompt += f"\n```State Information\n{json.dumps(cluster_info, ensure_ascii=False, indent=4)}\n```\n"
 
         # tested functions

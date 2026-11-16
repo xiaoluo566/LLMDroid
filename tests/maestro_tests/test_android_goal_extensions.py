@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot' / 'droidbot'))
 from maestro.android_bridge import snapshot_from_device
+from maestro.android_bridge import CandidatePool
 from maestro.android_runtime import AndroidRuntime
 from maestro.decision_backend import FakeDecisionBackend
 from maestro.goal_selection import GoalCandidate
@@ -34,7 +35,7 @@ class GoalExtensionsTests(unittest.TestCase):
                              widgets, target_widget_id=target)
 
     def select(self, runtime, native, candidate):
-        with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+        with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
             return runtime.select(SimpleNamespace(clusters=(), last_state=native))
 
     def rows(self, folder):
@@ -83,7 +84,7 @@ class GoalExtensionsTests(unittest.TestCase):
             candidate = self.candidate(runtime, stale, "navigate to 'Log'", 'log')
             backend.responses['goal_selection'] = {
                 'candidate_id': 'c1', 'subgoals': [f'click:{candidate.target_widget_id}']}
-            with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+            with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
                 result = runtime.select(SimpleNamespace(clusters=(), last_state=stale), current_state=live)
             self.assertIsNotNone(result)
             self.assertFalse(any(r['event'] == 'goal_already_satisfied' for r in self.rows(folder)))

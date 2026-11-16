@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot' / 'droidbot'))
-from maestro.android_bridge import snapshot_from_device
+from maestro.android_bridge import CandidatePool, snapshot_from_device
 from maestro.android_runtime import AndroidRuntime
 from maestro.decision_backend import FakeDecisionBackend, ModelResponse
 from maestro.goal_selection import GoalCandidate
@@ -38,7 +38,7 @@ class AndroidGoalRuntimeTests(unittest.TestCase):
                                       'states/state_1.json', '1',
                                       snapshot_from_device(runtime.run_id, 0, before).widgets,
                                       target_widget_id=widget)
-            with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+            with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
                 self.assertIsNotNone(runtime.select(SimpleNamespace(clusters=())))
             touch = lambda view: SimpleNamespace(get_views=lambda: [view])
             with patch('maestro.android_bridge._event_classes', return_value=(touch, None)):
@@ -107,7 +107,7 @@ class AndroidGoalRuntimeTests(unittest.TestCase):
                                       'states/state_1.json', '1',
                                       snapshot_from_device(runtime.run_id, 0, before).widgets,
                                       target_widget_id=widget)
-            with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+            with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
                 self.assertIsNotNone(runtime.select(SimpleNamespace(clusters=())))
             touch = lambda view: SimpleNamespace(get_views=lambda: [view])
             with patch('maestro.android_bridge._event_classes', return_value=(touch, None)):
@@ -176,7 +176,7 @@ class AndroidGoalRuntimeTests(unittest.TestCase):
             candidate = GoalCandidate(runtime.run_id, 'c1', '1', "navigate to 'Log'",
                                       'states/state_1.json', '1',
                                       snapshot_from_device(runtime.run_id, 0, self.page(False)).widgets)
-            with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+            with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
                 self.assertIsNone(runtime.select(SimpleNamespace(clusters=())))
             self.assertFalse(backend.requests)
 
@@ -201,7 +201,7 @@ class AndroidGoalRuntimeTests(unittest.TestCase):
             runtime = AndroidRuntime(SimpleNamespace(output_dir=folder, package_name='example.app'), backend)
             candidate = GoalCandidate(runtime.run_id, 'c1', '1', "navigate to 'Log'",
                                       'states/state_1.json', '1', widgets, target_widget_id=widget)
-            with patch('maestro.android_runtime.candidates_from_utg', return_value=(candidate,)):
+            with patch('maestro.android_runtime.read_candidate_pool', return_value=CandidatePool((), (candidate,))):
                 self.assertIsNotNone(runtime.select(SimpleNamespace(clusters=())))
             self.assertEqual(len(backend.requests), 2)
             self.assertEqual(runtime.state.budget.model_calls_left, 10)
