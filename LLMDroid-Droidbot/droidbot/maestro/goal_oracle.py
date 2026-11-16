@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 from .schemas import ActionKind, GoalStatus
+from .visual_evidence import VisualEvidence
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class GoalContract:
     widget_type: str
     kind: str
     reason: str
+    before_titles: Tuple[Tuple[Optional[str], str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,19 +59,64 @@ def freeze_goal_contract(candidate, goal_id, before):
             reason = 'Target was already selected before the goal; no new selection can be established'
         else:
             kind, reason = 'target_selected', 'Require the original destination/filter control to become selected or checked; this verifies that selection, not downstream business effects'
+    if target is not None and target.widget_type in {'button', 'clickable'}:
+        kind, reason = _arrival_kind(candidate.function, target, before, kind, reason)
     return GoalContract(
         candidate.run_id, goal_id, candidate.candidate_id, candidate.function,
         before.state_version, candidate.target_widget_id,
         target.resource_id if target else None, target.text if target else '',
         target.widget_type if target else '', kind, reason,
+        tuple((w.resource_id, _normalize(w.text)) for w in before.widgets if _is_title(w)),
     )
+
+
+def _normalize(text):
+    return ' '.join(text.casefold().split())
+
+
+def _is_title(widget):
+    resource = (widget.resource_id or '').partition(':id/')[2]
+    return (widget.widget_type == 'label' and bool(widget.text.strip())
+            and bool(re.search(r'(?:^|_)(?:title|toolbar_label|toolbar_title|header_title)$', resource)))
+
+
+def _tutorial_titles(page):
+    return tuple(w for w in page.widgets if _is_title(w)
+                 and _normalize(w.text) in {'tutorial', 'tutorials', '教程', '入门教程'})
+
+
+def _entry(widget):
+    return (widget.widget_type in {'button', 'clickable'} and bool(widget.text.strip())
+            and bool(re.search(r'list|item', widget.resource_id or '', re.I)))
+
+
+def _arrival_kind(function, target, before, kind, reason):
+    function = function.strip()
+    tutorial_list = re.match(
+        r'^(?:get(?:ting)? started\b|入门|(?:open|show) (?:tutorials\b|tutorial list\b)|教程列表)',
+        function, re.I)
+    localized_entry = (_normalize(target.text) in {'入门', 'get started', 'getting started', '教程', 'tutorials'}
+                       and re.match(r'^(?:open|show|start)\b|^(?:打开|显示)', function, re.I))
+    if re.match(r'^(?:start|open) onboarding\b', function, re.I) and not localized_entry:
+        return 'unsupported', 'Onboarding aliases require an observed get-started/tutorial entry label'
+    if tutorial_list or localized_entry:
+        return 'tutorial_list', 'Require a new tutorial title and multiple named tutorial entries'
+    if re.match(r'^(?:open|start|launch|show)\b.*\btutorial\b|^打开.*教程', function, re.I):
+        if _tutorial_titles(before) and _entry(target):
+            return 'tutorial_open', 'Require the bound tutorial entry click and a new stable spotlight guide'
+        return 'unsupported', 'Tutorial opening requires an observed entry inside a tutorial list'
+    if re.match(r'^(?:filter (?:records|log)\b|过滤记录|筛选记录)', function, re.I):
+        return 'apply_filter', 'Require a new condition, application and persisted-condition readback'
+    if re.match(r'^(?:open|show|view)\b|^(?:打开|显示)', function, re.I) and target.text.strip():
+        return 'open_view', 'Require a new destination title matching the original control label'
+    return kind, reason
 
 
 def _bound_observation(contract, state, after, refs):
     action = state.last_action
     source = dict(state.goal_source)
     return bool(
-        refs and after is not None and contract.kind == 'target_selected'
+        refs and after is not None
         and state.run_id == contract.run_id == after.run_id
         and state.goal_id == contract.goal_id and state.goal_description == contract.function
         and (not source or source.get('candidate_id') == contract.candidate_id)
@@ -95,16 +142,49 @@ def _selected_target(contract, after):
             and (target.selected is True or target.checked is True))
 
 
-def evaluate_goal(contract, state, after, evidence_ref):
-    """Selected/checked destination evidence can establish PASS; text or UI change cannot."""
+def _new_title(contract, widget):
+    return (_is_title(widget) and widget.widget_id != contract.target_widget_id
+            and _normalize(widget.text) not in {text for _, text in contract.before_titles})
+
+
+def _arrived(contract, after):
+    if contract.kind == 'open_view':
+        return any(_new_title(contract, w) and _normalize(w.text) == _normalize(contract.target_text)
+                   for w in after.widgets)
+    if contract.kind == 'tutorial_list':
+        titles = tuple(w for w in _tutorial_titles(after) if _new_title(contract, w))
+        entries = {(_normalize(w.text), w.widget_id) for w in after.widgets if _entry(w)}
+        return bool(titles) and len({text for text, _ in entries}) >= 2
+    return False
+
+
+def _visual_matches(evidence, state):
+    return (isinstance(evidence, VisualEvidence) and evidence.status == 'PASS'
+            and evidence.run_id == state.run_id and evidence.goal_id == state.goal_id
+            and evidence.action_id == state.last_action.action_id
+            and evidence.state_version == state.state_version and bool(evidence.evidence_refs)
+            and evidence.focus_bounds is not None and evidence.confirmed_focus_bounds is not None
+            and all(re.fullmatch(r'[0-9a-f]{64}', digest or '') for digest in (
+                evidence.before_sha256, evidence.after_sha256, evidence.confirmed_sha256))
+            and evidence.before_sha256 != evidence.after_sha256
+            and all(isinstance(ref, str) and ref.strip() for ref in evidence.evidence_refs))
+
+
+def evaluate_goal(contract, state, after, evidence_ref, visual_evidence=None):
+    """Only frozen goal predicates and a matching observed action establish PASS."""
     refs = (evidence_ref,) if isinstance(evidence_ref, str) and evidence_ref.strip() else ()
     action_id = state.last_action.action_id if state.last_action is not None else None
     status, reason = 'UNKNOWN', contract.reason
-    if contract.kind == 'target_selected':
-        reason = 'No matching dispatched target action and fresh selected-state evidence'
-        if _bound_observation(contract, state, after, refs) and _selected_target(contract, after):
-            status = 'PASS'
-            reason = 'The original goal control became selected/checked after its observed click'
+    if contract.kind in {'target_selected', 'open_view', 'tutorial_list', 'tutorial_open'}:
+        reason = 'No matching dispatched target action and fresh goal-specific postcondition'
+        if _bound_observation(contract, state, after, refs):
+            if contract.kind == 'target_selected' and _selected_target(contract, after):
+                status, reason = 'PASS', 'The original goal control became selected/checked after its observed click'
+            elif _arrived(contract, after):
+                status, reason = 'PASS', 'The frozen destination title and required view structure appeared'
+            elif contract.kind == 'tutorial_open' and _visual_matches(visual_evidence, state):
+                status, reason = 'PASS', 'The original tutorial entry opened a new stable spotlight guide'
+                refs = tuple(dict.fromkeys(refs + visual_evidence.evidence_refs))
     return GoalAssessment(state.run_id, state.goal_id, state.state_version,
                           action_id, status, reason, refs)
 

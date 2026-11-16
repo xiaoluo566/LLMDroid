@@ -91,7 +91,8 @@ def _widget_bindings(state):
             kind = "label"
         yield WidgetSnapshot(identifier, kind, label, resource or None,
                              selected=view.get('selected') is True,
-                             checked=view.get('checked') is True), view
+                             checked=view.get('checked') is True,
+                             checkable=view.get('checkable') is True), view
 
 
 def snapshot_from_device(run_id, version, device_state):

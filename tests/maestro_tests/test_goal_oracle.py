@@ -45,6 +45,95 @@ class GoalOracleTests(unittest.TestCase):
         self.assertEqual((result.run_id, result.goal_id, result.action_id),
                          ('run', 'goal', 'click'))
 
+    def goal_page(self, function, target_text='入门', extra_before=(), resource_id=None):
+        target = replace(self.target, text=target_text, resource_id=resource_id or self.target.resource_id)
+        before = replace(self.before, widgets=(target,) + extra_before)
+        candidate = replace(self.candidate, function=function, widgets=before.widgets)
+        state = replace(self.observed(), goal_description=function)
+        return freeze_goal_contract(candidate, 'goal', before), state
+
+    @staticmethod
+    def tutorial_widgets():
+        return (WidgetSnapshot('title', 'label', '教程', 'pkg:id/title'),
+                WidgetSnapshot('one', 'button', '创建分类', 'pkg:id/tutorial_list_field'),
+                WidgetSnapshot('two', 'button', '管理类别', 'pkg:id/tutorial_list_field'))
+
+    def test_get_started_arrival_requires_new_tutorial_title_and_entry_structure(self):
+        contract, state = self.goal_page('get started (入门)')
+        self.assertEqual(contract.kind, 'tutorial_list')
+        after = replace(self.before, state_version=2, widgets=self.tutorial_widgets())
+        self.assertEqual(evaluate_goal(contract, state, after, 'after.json').status, 'PASS')
+        for widgets in (self.tutorial_widgets()[:1], self.tutorial_widgets()[1:],
+                        (replace(self.tutorial_widgets()[0], widget_type='input'),)
+                        + self.tutorial_widgets()[1:]):
+            self.assertEqual(evaluate_goal(contract, state, replace(after, widgets=widgets),
+                                           'after.json').status, 'UNKNOWN')
+
+    def test_explicit_tutorial_list_wording_and_localized_entry_label(self):
+        for function in ('open tutorial list', 'show tutorials', 'open getting started'):
+            contract, state = self.goal_page(function)
+            self.assertEqual(contract.kind, 'tutorial_list', function)
+        contract, _ = self.goal_page('complete all tutorials')
+        self.assertEqual(contract.kind, 'unsupported')
+
+    def test_onboarding_alias_keeps_original_goal_and_requires_tutorial_arrival(self):
+        after = replace(self.before, state_version=2, widgets=self.tutorial_widgets())
+        wizard = replace(after, widgets=(
+            WidgetSnapshot('wizard-title', 'label', 'Welcome', 'pkg:id/title'),
+            WidgetSnapshot('next', 'button', 'Next', 'pkg:id/next_button')))
+        for function, label in (('start onboarding', '入门'), ('open onboarding', 'Get started')):
+            contract, state = self.goal_page(function, target_text=label)
+            self.assertEqual(contract.function, function)
+            self.assertEqual(contract.kind, 'tutorial_list')
+            self.assertEqual(evaluate_goal(contract, state, after, 'after.json').status, 'PASS')
+            self.assertEqual(evaluate_goal(contract, state, wizard, 'after.json').status, 'UNKNOWN')
+
+    def test_onboarding_alias_without_grounded_entry_label_is_unsupported(self):
+        contract, _ = self.goal_page('open onboarding', target_text='Continue')
+        self.assertEqual(contract.kind, 'unsupported')
+
+    def test_existing_tutorial_title_does_not_establish_new_arrival(self):
+        contract, state = self.goal_page('open tutorials', extra_before=self.tutorial_widgets())
+        after = replace(self.before, state_version=2, widgets=self.tutorial_widgets())
+        self.assertEqual(evaluate_goal(contract, state, after, 'after.json').status, 'UNKNOWN')
+
+    def test_same_title_with_a_different_resource_is_still_preexisting(self):
+        contract, state = self.goal_page('open Settings', target_text='Settings', extra_before=(
+            WidgetSnapshot('old-title', 'label', 'Settings', 'pkg:id/old_title'),))
+        after = replace(self.before, state_version=2, widgets=(
+            WidgetSnapshot('new-title', 'label', 'Settings', 'pkg:id/title'),))
+        self.assertEqual(evaluate_goal(contract, state, after, 'after.json').status, 'UNKNOWN')
+
+    def test_open_view_requires_new_matching_title_not_input_or_unrelated_title(self):
+        contract, state = self.goal_page('open Settings', target_text='Settings')
+        after = replace(self.before, state_version=2, widgets=(
+            WidgetSnapshot('new-title', 'label', 'Settings', 'pkg:id/toolbar_label'),))
+        self.assertEqual(contract.kind, 'open_view')
+        self.assertEqual(evaluate_goal(contract, state, after, 'after.json').status, 'PASS')
+        for widget in (replace(after.widgets[0], text='Search'),
+                       replace(after.widgets[0], widget_type='input'),
+                       replace(after.widgets[0], resource_id='pkg:id/value'),
+                       replace(after.widgets[0], widget_id='log')):
+            self.assertEqual(evaluate_goal(contract, state, replace(after, widgets=(widget,)),
+                                           'after.json').status, 'UNKNOWN')
+
+    def test_tutorial_entry_cannot_pass_without_matching_visual_evidence(self):
+        contract, state = self.goal_page("open 'create category' tutorial", target_text='创建分类',
+                                         extra_before=self.tutorial_widgets()[:1],
+                                         resource_id='pkg:id/tutorial_list_field')
+        self.assertEqual(contract.kind, 'tutorial_open')
+        self.assertEqual(evaluate_goal(contract, state, self.after(), 'after.json').status, 'UNKNOWN')
+
+    def test_tutorial_open_requires_real_tutorial_list_source(self):
+        contract, state = self.goal_page("open 'create category' tutorial", target_text='创建分类')
+        self.assertEqual(contract.kind, 'unsupported')
+        self.assertEqual(evaluate_goal(contract, state, self.after(), 'after.json').status, 'UNKNOWN')
+
+    def test_filter_intent_is_frozen_but_needs_its_own_workflow_evidence(self):
+        contract, state = self.goal_page('filter records', target_text='过滤')
+        self.assertEqual(contract.kind, 'apply_filter')
+        self.assertEqual(evaluate_goal(contract, state, self.after(), 'after.json').status, 'UNKNOWN')
+
     def test_checked_filter_can_pass_but_typing_category_cannot(self):
         candidate = replace(self.candidate, function='select category filter')
         state = replace(self.observed(), goal_description=candidate.function)

@@ -262,6 +262,12 @@ class StateCluster(ActionListener):
         """Return the original function's control in its recorded target state."""
         with self.__lock:
             detail = self.__functions.get(function)
-            if detail is None or detail['widget_id'] < 0:
+            if detail is None:
                 return None
+            if detail['widget_id'] < 0:
+                # Reanalysis stores the function on its actual Widget without
+                # assigning a root-state ID. Preserve that recorded mapping.
+                targets = [widget for widget in detail['state'].get_all_widgets()
+                           if widget.get_function() == function]
+                return targets[0] if len(targets) == 1 else None
             return detail['state'].find_widget_by_id(detail['widget_id'])

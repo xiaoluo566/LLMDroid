@@ -44,6 +44,31 @@ class FrozenGoal:
     request_id: str
 
 
+def is_navigation_function(function):
+    """Identify navigation intents without treating a business selection as navigation."""
+    return bool(re.match(
+        r'^\s*(?:navigate\s+to\b|go\s+to\b|switch\s+to\b|进入|切换)', function, re.I,
+    ))
+
+
+def candidate_is_already_satisfied(candidate, page):
+    """Use the current observation, never an old candidate's selection state."""
+    if (page.run_id != candidate.run_id or candidate.target_widget_id is None
+            or not is_navigation_function(candidate.function)):
+        return False
+    source = next((widget for widget in candidate.widgets
+                   if widget.widget_id == candidate.target_widget_id), None)
+    target = next((widget for widget in page.widgets
+                   if widget.widget_id == candidate.target_widget_id), None)
+    return bool(
+        source is not None and target is not None
+        and target.widget_type in {'button', 'clickable'}
+        and (target.resource_id, target.text, target.widget_type)
+        == (source.resource_id, source.text, source.widget_type)
+        and (target.selected or target.checked)
+    )
+
+
 @dataclass(frozen=True)
 class GoalSelectionOutcome:
     budget: Budget
@@ -140,6 +165,8 @@ class ModelGoalSelector:
                     '导航/打开功能只能单步 click:target_widget_id。其他按钮功能可以先准备输入，'
                     '最后必须 click:target_widget_id；不能用输入关键词或 Enter 代替选择过滤器。'
                     '输入功能只允许操作它本身的输入框。'
+                    'selected、checked、checkable 是候选来源页的观测属性；'
+                    '运行时另用当前页面跳过已满足的导航目标，不将重复点击计作新成功。'
                 ),
                 'candidates': [
                     {'candidate_id': c.candidate_id, 'state_id': c.state_id,
@@ -147,7 +174,8 @@ class ModelGoalSelector:
                      'observation_ref': c.observation_ref,
                      'target_widget_id': c.target_widget_id,
                      'widgets': [{'id': w.widget_id, 'type': w.widget_type, 'resource_id': w.resource_id,
-                                  'text': w.text} for w in c.widgets
+                                  'text': w.text, 'selected': w.selected,
+                                  'checked': w.checked, 'checkable': w.checkable} for w in c.widgets
                                  if w.widget_type in {'button', 'clickable', 'input', 'editable', 'text'}]}
                     for c in candidates
                 ],
@@ -198,8 +226,9 @@ def _validate_semantic_plan(candidate, steps):
         # Offline callers can use manually authored goals without a UTG mapping.
         return
     target = next(widget for widget in candidate.widgets if widget.widget_id == anchor)
-    navigation = bool(re.match(r"^\s*(?:navigate(?:\s+to)?|open|go\s+to)\b", candidate.function, re.I)
-                      or candidate.function.lstrip().startswith(('进入', '打开')))
+    navigation = (is_navigation_function(candidate.function)
+                  or bool(re.match(r'^\s*open\b', candidate.function, re.I))
+                  or candidate.function.lstrip().startswith('打开'))
     if target.widget_type in {'button', 'clickable'}:
         if steps[-1] != f'click:{anchor}':
             raise ValueError('计划必须以原功能锚点的点击结束')

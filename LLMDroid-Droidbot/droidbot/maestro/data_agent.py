@@ -1,4 +1,5 @@
 from .schemas import ActionKind, ActionProposal, GoalState, PageSnapshot
+from .stage_steps import execution_step
 
 
 class DataProposalError(ValueError):
@@ -9,7 +10,7 @@ class RuleBasedDataAgent:
     """从固定步骤生成单个点击、文本输入或 Enter 提案。"""
 
     def propose(self, state: GoalState, snapshot: PageSnapshot) -> ActionProposal:
-        subgoal = state.current_subgoal
+        subgoal = execution_step(state.current_subgoal)
         if not subgoal:
             raise DataProposalError("当前没有可执行子目标")
 

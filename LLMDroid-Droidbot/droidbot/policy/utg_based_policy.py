@@ -363,7 +363,7 @@ class UtgBasedInputPolicy(InputPolicy):
 
     def __prepare_maestro_navigation(self):
         candidate = self.maestro_runtime.select(
-            self.utg, self.__llm_agent.maestro_ranked_clusters())
+            self.utg, self.__llm_agent.maestro_ranked_clusters(), current_state=self._live_state)
         if candidate is None:
             self.__prepare_back_to_explore()
             return

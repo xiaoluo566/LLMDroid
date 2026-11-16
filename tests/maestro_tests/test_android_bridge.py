@@ -59,6 +59,16 @@ class Cluster:
 
 
 class AndroidBridgeTests(unittest.TestCase):
+    def test_native_checkability_is_boolean_evidence_not_a_truthy_string(self):
+        snapshot = snapshot_from_device('run', 0, page(
+            view('example.app:id/condition', checkable=True),
+            view('example.app:id/other', clickable=True, checkable='true')))
+        self.assertTrue(snapshot.widgets[0].checkable)
+        self.assertFalse(snapshot.widgets[1].checkable)
+        for invalid in ('true', 1, None):
+            with self.assertRaises(ValueError):
+                WidgetSnapshot('test', 'button', checkable=invalid)
+
     def test_native_selected_checked_are_explicit_boolean_evidence(self):
         snapshot = snapshot_from_device('run', 0, page(
             view('example.app:id/log', clickable=True, selected=True, checked=False),
@@ -112,6 +122,7 @@ class AndroidBridgeTests(unittest.TestCase):
         root.width = root.height = 100
         root.get_id.return_value = 4
         root.get_possible_input.return_value = []
+        root.get_all_widgets.return_value = []
         cluster = StateCluster(root, 2)
         cluster.update_from_overview({'Overview': 'Entry editor', 'Function List': {'Save entry': 1}})
         (candidate,) = candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app')
@@ -122,6 +133,48 @@ class AndroidBridgeTests(unittest.TestCase):
         self.assertIsNone(cluster.get_function_target_widget('Unknown'))
         cluster.update_tested_function('Not mapped')
         self.assertIsNone(cluster.get_function_target_widget('Not mapped'))
+
+    def test_reanalysis_function_resolves_unique_original_widget_in_recorded_state(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot'))
+        try:
+            from droidbot.desc.state_cluster import StateCluster
+            from droidbot.desc.widget import Widget
+        except ImportError as error:
+            self.skipTest(f'DroidBot dependency unavailable: {error.name}')
+        finally:
+            sys.path.pop(0)
+        raw = view('example.app:id/tutorial', clickable=True, text='Tutorials', temp_id=17)
+        original = Widget(raw)
+        root, actual = Mock(), Mock()
+        actual.views = [raw]
+        actual.state_str = 'actual-page'
+        actual.foreground_activity = 'example.app/.Main'
+        actual.width = actual.height = 100
+        actual.get_id.return_value = 7
+        actual.get_all_widgets.return_value = [original]
+        actual.find_events_by_widget.return_value = []
+        root.get_all_widgets.return_value = []
+        cluster = StateCluster(root, 2)
+        cluster.update_from_reanalysis(
+            {'17': 'open tutorials'}, {original.to_html(id=0): [17]},
+            {17: {'widget': original, 'state': actual}},
+        )
+        self.assertIs(cluster.get_target_state('open tutorials'), actual)
+        self.assertEqual(original.get_function(), 'open tutorials')
+        self.assertIs(cluster.get_function_target_widget('open tutorials'), original)
+        (candidate,) = candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app')
+        self.assertEqual(candidate.state_id, '7')
+        self.assertEqual(candidate.target_widget_id, candidate.widgets[0].widget_id)
+
+        duplicate = Widget(view('example.app:id/other', clickable=True,
+                                text='Other', temp_id=18))
+        duplicate.set_function('open tutorials')
+        actual.get_all_widgets.return_value = [original, duplicate]
+        self.assertIsNone(cluster.get_function_target_widget('open tutorials'))
+        self.assertEqual((), candidates_from_utg('run', SimpleNamespace(clusters=(cluster,)), 'example.app'))
+        actual.get_all_widgets.return_value = [duplicate]
+        duplicate.set_function('different function')
+        self.assertIsNone(cluster.get_function_target_widget('open tutorials'))
 
     def setUp(self):
         self.field = view("example.app:id/value", editable=True, text="original")

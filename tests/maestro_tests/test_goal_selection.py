@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'LLMDroid-Droidbot'
 
 from maestro.decision_backend import ModelResponse, ResponseFormatError
 from maestro.goal_selection import GoalCandidate, ModelGoalSelector
-from maestro.schemas import Budget, WidgetSnapshot
+from maestro.schemas import Budget, PageSnapshot, WidgetSnapshot
+from maestro import goal_selection
 from maestro.session import create_goal_state
 
 
@@ -25,6 +26,59 @@ class Backend:
 
 
 class GoalSelectionTests(unittest.TestCase):
+    def test_already_satisfied_requires_fresh_matching_navigation_target(self):
+        target = WidgetSnapshot('log', 'button', 'Log', 'app:id/log')
+        candidate = replace(self.candidate, function="navigate to 'Log'",
+                            widgets=(target,), target_widget_id='log')
+        fresh = PageSnapshot('run', 5, 'fresh', (replace(target, selected=True),))
+        self.assertTrue(goal_selection.candidate_is_already_satisfied(candidate, fresh))
+        stale_selected = replace(candidate, widgets=(replace(target, selected=True),))
+        self.assertFalse(goal_selection.candidate_is_already_satisfied(
+            stale_selected, replace(fresh, widgets=(target,))))
+        for page in (
+            replace(fresh, run_id='other'),
+            replace(fresh, widgets=()),
+            replace(fresh, widgets=(replace(target, selected=False),)),
+            replace(fresh, widgets=(replace(target, widget_id='another', selected=True),)),
+            replace(fresh, widgets=(replace(target, resource_id='other', selected=True),)),
+            replace(fresh, widgets=(replace(target, text='Other', selected=True),)),
+            replace(fresh, widgets=(replace(target, widget_type='label', selected=True),)),
+        ):
+            with self.subTest(page=page):
+                self.assertFalse(goal_selection.candidate_is_already_satisfied(candidate, page))
+
+    def test_navigation_precondition_does_not_treat_selected_business_action_as_complete(self):
+        target = WidgetSnapshot('save', 'button', 'Save', selected=True)
+        page = PageSnapshot('run', 1, 'fresh', (target,))
+        for function in ('save entry', 'filter records', 'select category filter', 'open editor',
+                         'navigate away from Log', 'switch filter condition'):
+            candidate = replace(self.candidate, function=function,
+                                widgets=(target,), target_widget_id='save')
+            self.assertFalse(goal_selection.candidate_is_already_satisfied(candidate, page))
+        candidate = replace(self.candidate, function='navigate to Log', widgets=(target,))
+        self.assertFalse(goal_selection.candidate_is_already_satisfied(candidate, page))
+
+    def test_navigation_aliases_share_precondition_and_plan_constraints(self):
+        target = WidgetSnapshot('save', 'button', 'Log')
+        for function in ('go to Log', 'switch to Control', '进入日志', '切换至控制页'):
+            candidate = replace(self.candidate, function=function, target_widget_id='save',
+                                widgets=(target, WidgetSnapshot('title', 'input')))
+            fresh = PageSnapshot('run', 1, 'fresh', (replace(target, checked=True),))
+            self.assertTrue(goal_selection.candidate_is_already_satisfied(candidate, fresh))
+            result = ModelGoalSelector(Backend({'candidate_id': 'candidate', 'subgoals': [
+                'text:title=query', 'click:save']})).select('run', (candidate,), Budget(), 'request')
+            self.assertIsNone(result.selection)
+
+    def test_planner_receives_observed_control_selection_and_checkability(self):
+        target = WidgetSnapshot('save', 'button', 'Log', selected=True, checked=False,
+                                checkable=True)
+        candidate = replace(self.candidate, widgets=(target,), target_widget_id='save')
+        backend = Backend({'candidate_id': 'candidate', 'subgoals': ['click:save']})
+        ModelGoalSelector(backend).select('run', (candidate,), Budget(), 'request')
+        widget = backend.requests[0].payload['candidates'][0]['widgets'][0]
+        self.assertEqual((widget['selected'], widget['checked'], widget['checkable']),
+                         (True, False, True))
+
     def test_navigation_plan_cannot_substitute_search_for_log(self):
         candidate = replace(self.candidate, function="navigate to 'Log'",
                             target_widget_id='save', widgets=self.candidate.widgets + (

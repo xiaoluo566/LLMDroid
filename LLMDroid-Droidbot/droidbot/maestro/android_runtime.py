@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
@@ -9,8 +10,11 @@ from uuid import uuid4
 from .android_bridge import bind_event, candidates_from_utg, snapshot_from_device
 from .android_oracle import AndroidOracle, ModelAndroidOracle, assess
 from .cooperation import Feedback, collaborate_once, merge_assessment, refresh_observation
-from .goal_selection import ModelGoalSelector
+from .goal_selection import ModelGoalSelector, candidate_is_already_satisfied
 from .goal_oracle import freeze_goal_contract, evaluate_goal, apply_goal_assessment
+from .filter_workflow import (ModelFilterPlanner, append_filter_stage,
+                              observe_filter_stage, assess_filter_goal)
+from .visual_evidence import inspect_tutorial_overlay
 from .model_data import ModelDataAgent
 from .planner import FixedGoalPlanner
 from .schemas import Budget, DecisionKind, ExecutionRecord, GoalStatus, PageSnapshot, WidgetSnapshot
@@ -42,7 +46,8 @@ class TracedBackend:
         self.backend, self.trace = backend, trace
 
     def complete(self, request):
-        role = {'goal_selection': 'Planner', 'oracle': 'Oracle'}.get(request.role, 'Data')
+        role = {'goal_selection': 'Planner', 'planner_stage': 'Planner',
+                'oracle': 'Oracle'}.get(request.role, 'Data')
         details = {key: request.payload[key] for key in
                    ('state_version', 'current_subgoal', 'constraints')
                    if key in request.payload}
@@ -71,6 +76,7 @@ class AndroidRuntime:
         self.data = ModelDataAgent(TracedBackend(backend, self))
         self.planner = FixedGoalPlanner()
         self.oracle = ModelAndroidOracle(TracedBackend(backend, self))
+        self.filter_planner = ModelFilterPlanner(TracedBackend(backend, self))
         self.observer = AndroidOracle()
         self.version = 0
         self.state = None
@@ -86,6 +92,8 @@ class AndroidRuntime:
         self.utg = None
         self.candidate = None
         self.goal_contract = None
+        self.filter_progress = None
+        self.visual_evidence = None
         self.selector = ModelGoalSelector(
             TracedBackend(backend, self), selection_hint=(
                 'For this connectivity canary prioritize a function on the current page that exercises '
@@ -107,11 +115,20 @@ class AndroidRuntime:
                            budget=asdict(state.budget))
         self._stream.write(role, event, **context, **details)
 
-    def select(self, utg, clusters=None):
+    def select(self, utg, clusters=None, current_state=None):
         self.utg = utg
         candidates = tuple(candidate for candidate in candidates_from_utg(
             self.run_id, utg, self.app.package_name, clusters)
             if candidate.target_widget_id is not None)
+        current = current_state if current_state is not None else getattr(utg, 'last_state', None)
+        if self._belongs(current):
+            page = snapshot_from_device(self.run_id, self.version, current)
+            satisfied = tuple(c for c in candidates if candidate_is_already_satisfied(c, page))
+            for candidate in satisfied:
+                self.write('Planner', 'goal_already_satisfied', candidate_id=candidate.candidate_id,
+                           function=candidate.function, state_id=page.state_id,
+                           target_widget_id=candidate.target_widget_id, counted_as_success=False)
+            candidates = tuple(c for c in candidates if c not in satisfied)
         self.canary_fired = self.canary
         self.write('Policy', 'canary_trigger' if self.canary else 'low_growth',
                    candidate_count=len(candidates))
@@ -137,6 +154,8 @@ class AndroidRuntime:
         self.state = selected.create_state(self.version)
         self.candidate = selected.selection.candidate
         self.goal_contract = None
+        self.filter_progress = None
+        self.visual_evidence = None
         self.canary_goals += 1
         self.passed = []
         self.write('Planner', 'goal_selected', source=dict(self.state.goal_source),
@@ -158,6 +177,7 @@ class AndroidRuntime:
                         break
         self.state, self.pending, self.feedback = None, None, None
         self.candidate, self.goal_contract = None, None
+        self.filter_progress, self.visual_evidence = None, None
         self.canary_finished = self.canary and self.canary_goals >= self.max_canary_goals
         if self.canary and not self.canary_finished:
             self.canary_fired = False
@@ -191,6 +211,12 @@ class AndroidRuntime:
             self.finish('UNKNOWN', 'Foreground activity is outside the tested app')
             return None
         snapshot = snapshot_from_device(self.run_id, self.state.state_version, device_state)
+        if self.candidate is not None and candidate_is_already_satisfied(self.candidate, snapshot):
+            self.write('Planner', 'goal_already_satisfied', candidate_id=self.candidate.candidate_id,
+                       function=self.candidate.function, state_id=snapshot.state_id,
+                       target_widget_id=self.candidate.target_widget_id, counted_as_success=False)
+            self.finish('SKIPPED', 'The navigation goal is already satisfied; no repeated click')
+            return None
         if self.candidate is not None and self.goal_contract is None:
             self.goal_contract = freeze_goal_contract(self.candidate, self.state.goal_id, snapshot)
             self.write('Oracle', 'goal_rule_frozen', contract=asdict(self.goal_contract))
@@ -270,7 +296,11 @@ class AndroidRuntime:
         if not page or not evidence:
             self.finish('UNKNOWN', record.execution_status if not page else 'EventLog is missing')
             return
-        evidence = self._save_observation(action, page, evidence)
+        native_event_ref = evidence
+        evidence = self._save_observation(action, page, native_event_ref, device_state)
+        if self.goal_contract is not None and self.goal_contract.kind == 'tutorial_open':
+            page, evidence = self._tutorial_observation(action, page, evidence, event_log,
+                                                       native_event_ref)
         assessment = assess(rule, self.state, page, evidence)
         if assessment.status == 'UNKNOWN':
             assessment = self._observe_again(action, rule, page, event_log.device, evidence)
@@ -300,18 +330,103 @@ class AndroidRuntime:
                                 tuple(WidgetSnapshot(**w) for w in saved['widgets']))
             if saved['action_id'] != action.action_id:
                 raise ValueError('Goal observation does not match the completed action')
-        verdict = evaluate_goal(self.goal_contract, self.state, page, evidence)
+        if self.goal_contract.kind == 'apply_filter':
+            self._advance_filter(page, evidence)
+            return
+        verdict = evaluate_goal(self.goal_contract, self.state, page, evidence,
+                                visual_evidence=self.visual_evidence)
         self.write('Oracle', 'goal_assessed', assessment=asdict(verdict))
         if verdict.status == 'PASS':
             self.state = apply_goal_assessment(self.state, verdict)
         self.finish(verdict.status, verdict.reason)
 
-    def _save_observation(self, action, page, event_ref):
+    def _advance_filter(self, page, evidence):
+        try:
+            if self.filter_progress is None:
+                self.state = self.state._updated(budget=self.state.budget.consume_model_call())
+                self.filter_progress = self.filter_planner.choose(
+                    self.state, page, self.candidate.target_widget_id, evidence)
+                self.write('Planner', 'filter_condition_frozen', progress=asdict(self.filter_progress))
+            else:
+                self.filter_progress = observe_filter_stage(self.filter_progress, self.state,
+                                                            page, evidence)
+                self.write('Oracle', 'filter_phase_observed', progress=asdict(self.filter_progress))
+            if self.filter_progress.phase == 'verified':
+                verdict = assess_filter_goal(self.filter_progress, self.state, page, evidence)
+                self.write('Oracle', 'goal_assessed', assessment=asdict(verdict))
+                if verdict.status == 'PASS':
+                    self.state = apply_goal_assessment(self.state, verdict)
+                self.finish(verdict.status, verdict.reason)
+            else:
+                self.state = append_filter_stage(self.state, self.filter_progress, page)
+                self.write('Planner', 'stage_planned', phase=self.filter_progress.phase,
+                           steps=self.state.subgoals)
+        except Exception as error:
+            self.write('Planner', 'filter_stage_rejected', error_type=type(error).__name__,
+                       reason=str(error) if isinstance(error, (ValueError, KeyError)) else 'Stage request failed')
+            self.finish('UNKNOWN', 'Filter stage or persisted-condition evidence was not established')
+
+    def _screenshot_ref(self, native):
+        """Retain the capture before DroidBot moves or removes its temporary file."""
+        path = getattr(native, 'screenshot_path', None)
+        if not isinstance(path, str):
+            return None
+        try:
+            resolved = Path(path).resolve()
+            resolved.relative_to(self.output.resolve())
+            if not resolved.is_file():
+                return None
+            folder = self.output / 'maestro-observations' / 'screenshots'
+            folder.mkdir(parents=True, exist_ok=True)
+            saved = folder / f'{uuid4().hex}{resolved.suffix}'
+            shutil.copyfile(resolved, saved)
+            return saved.relative_to(self.output).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    def _tutorial_observation(self, action, page, evidence, log, native_event_ref):
+        before = self._screenshot_ref(log.from_state)
+        after = self._screenshot_ref(log.to_state)
+        if before is None or after is None:
+            self.write('Oracle', 'visual_unavailable', action_id=action.action_id,
+                       reason='Native before/after screenshots are unavailable')
+            return page, evidence
+        # A first frame may be mid-animation. At most two read-only recaptures
+        # establish a stable pair; no device action or model call is repeated.
+        for attempt in range(2):
+            self.write('Oracle', 'evidence_requested', action_id=action.action_id,
+                       requests=('Independently recapture the tutorial spotlight without sending an event',))
+            self.write('Planner', 'observe_only', action_id=action.action_id,
+                       reason='Confirm a stable tutorial guide', attempt=attempt + 1)
+            fresh = log.device.get_current_state()
+            confirmed = self._screenshot_ref(fresh)
+            if not self._belongs(fresh) or confirmed is None:
+                break
+            self.version += 1
+            page = snapshot_from_device(self.run_id, self.version, fresh)
+            self.state = refresh_observation(self.state, page, action.action_id)
+            confirmed_evidence = self._save_observation(action, page, native_event_ref, fresh)
+            proof = f'maestro-observations/visual-{page.state_version}.json'
+            refs = (evidence, confirmed_evidence, before, after, confirmed, proof)
+            self.visual_evidence = inspect_tutorial_overlay(
+                self.run_id, self.state.goal_id, action.action_id, page.state_version,
+                self.output / before, self.output / after, self.output / confirmed, refs)
+            (self.output / proof).write_text(json.dumps(asdict(self.visual_evidence),
+                                                       ensure_ascii=False), encoding='utf-8')
+            self.write('Oracle', 'visual_assessed', visual=asdict(self.visual_evidence))
+            evidence = confirmed_evidence
+            if self.visual_evidence.status == 'PASS':
+                break
+            after = confirmed
+        return page, evidence
+
+    def _save_observation(self, action, page, event_ref, native=None):
         folder = self.output / 'maestro-observations'
         folder.mkdir(exist_ok=True)
         # A filesystem-safe name avoids colons in action IDs on Windows.
         file = folder / f'page-{page.state_version}.json'
         file.write_text(json.dumps(dict(action_id=action.action_id, event_log=event_ref,
+                                        screenshot_ref=self._screenshot_ref(native),
                                         **asdict(page)), ensure_ascii=False), encoding='utf-8')
         return file.relative_to(self.output).as_posix()
 
@@ -338,5 +453,5 @@ class AndroidRuntime:
         native_event_ref = prior['event_log']
         if not native_event_ref.startswith('events/') or '..' in Path(native_event_ref).parts:
             raise ValueError('Supplemental observation must retain its native event')
-        evidence = self._save_observation(action, page, native_event_ref)
+        evidence = self._save_observation(action, page, native_event_ref, fresh)
         return assess(rule, self.state, page, evidence)
